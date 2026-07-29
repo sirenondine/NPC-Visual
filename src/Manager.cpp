@@ -1,11 +1,13 @@
 ﻿#include "Manager.h"
 #include "DelayedDispatcher.h"
+#include "Events.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -78,6 +80,149 @@ namespace {
 
         return nullptr;
     }
+
+    RE::FormID GetFormID(const RE::TESForm* a_form)
+    {
+        return a_form ? a_form->GetFormID() : 0;
+    }
+
+    struct NPCVisualTintState
+    {
+        bool present = false;
+        std::uint8_t red = 0;
+        std::uint8_t green = 0;
+        std::uint8_t blue = 0;
+        std::uint8_t alpha = 0;
+        std::uint16_t tintIndex = 0;
+        std::uint16_t preset = 0;
+        std::uint16_t interpolationValue = 0;
+
+        bool operator==(const NPCVisualTintState&) const = default;
+    };
+
+    struct NPCVisualState
+    {
+        bool chargenFacePreset = false;
+        bool female = false;
+        bool oppositeGenderAnim = false;
+        float height = 0.0F;
+        float weight = 0.0F;
+        std::array<std::uint8_t, 4> bodyTint{};
+        RE::FormID race = 0;
+        RE::FormID skin = 0;
+        RE::FormID defaultOutfit = 0;
+        RE::FormID sleepOutfit = 0;
+        RE::FormID voice = 0;
+        RE::FormID hairColor = 0;
+        std::vector<RE::FormID> headParts;
+        std::vector<NPCVisualTintState> tintLayers;
+        std::array<float, RE::TESNPC::FaceData::Morphs::kTotal> morphs{};
+
+        bool operator==(const NPCVisualState&) const = default;
+    };
+
+    NPCVisualState CaptureNPCVisualState(const RE::TESNPC* a_npc)
+    {
+        NPCVisualState state;
+        if (!a_npc) {
+            return state;
+        }
+
+        const auto& flags = a_npc->actorData.actorBaseFlags;
+        state.chargenFacePreset = flags.all(RE::ACTOR_BASE_DATA::Flag::kIsChargenFacePreset);
+        state.female = flags.all(RE::ACTOR_BASE_DATA::Flag::kFemale);
+        state.oppositeGenderAnim = flags.all(RE::ACTOR_BASE_DATA::Flag::kOppositeGenderAnims);
+        state.height = a_npc->height;
+        state.weight = a_npc->weight;
+        state.bodyTint = {
+            a_npc->bodyTintColor.red,
+            a_npc->bodyTintColor.green,
+            a_npc->bodyTintColor.blue,
+            a_npc->bodyTintColor.alpha
+        };
+        state.race = GetFormID(a_npc->race);
+        state.skin = GetFormID(a_npc->farSkin);
+        state.defaultOutfit = GetFormID(a_npc->defaultOutfit);
+        state.sleepOutfit = GetFormID(a_npc->sleepOutfit);
+        state.voice = GetFormID(a_npc->voiceType);
+        state.hairColor = a_npc->headRelatedData ? GetFormID(a_npc->headRelatedData->hairColor) : 0;
+
+        const auto headPartCount = std::max(0, static_cast<int>(a_npc->numHeadParts));
+        if (a_npc->headParts && headPartCount > 0) {
+            state.headParts.reserve(static_cast<std::size_t>(headPartCount));
+            for (int i = 0; i < headPartCount; ++i) {
+                state.headParts.push_back(GetFormID(a_npc->headParts[i]));
+            }
+        }
+
+        if (a_npc->tintLayers) {
+            state.tintLayers.reserve(a_npc->tintLayers->size());
+            for (const auto* layer : *a_npc->tintLayers) {
+                NPCVisualTintState tint;
+                if (layer) {
+                    tint.present = true;
+                    tint.red = layer->tintColor.red;
+                    tint.green = layer->tintColor.green;
+                    tint.blue = layer->tintColor.blue;
+                    tint.alpha = layer->tintColor.alpha;
+                    tint.tintIndex = layer->tintIndex;
+                    tint.preset = layer->preset;
+                    tint.interpolationValue = layer->interpolationValue;
+                }
+                state.tintLayers.push_back(tint);
+            }
+        }
+
+        if (a_npc->faceData) {
+            std::copy_n(
+                a_npc->faceData->morphs,
+                RE::TESNPC::FaceData::Morphs::kTotal,
+                state.morphs.begin());
+        }
+
+        return state;
+    }
+
+    class NPCVisualChangeGuard
+    {
+    public:
+        explicit NPCVisualChangeGuard(RE::TESNPC* a_npc) :
+            _npc(a_npc)
+        {
+            try {
+                _before = CaptureNPCVisualState(a_npc);
+            } catch (const std::exception& e) {
+                logger::warn("[NPCVisualUpdate] Could not capture initial NPC state: {}", e.what());
+            } catch (...) {
+                logger::warn("[NPCVisualUpdate] Could not capture initial NPC state.");
+            }
+        }
+
+        ~NPCVisualChangeGuard() noexcept
+        {
+            if (!_npc || !_before) {
+                return;
+            }
+
+            try {
+                if (CaptureNPCVisualState(_npc) == *_before) {
+                    logger::debug("[NPCVisualUpdate] No semantic change for NPC {:08X}; event skipped.", _npc->GetFormID());
+                    return;
+                }
+
+                logger::debug("[NPCVisualUpdate] Semantic change detected for NPC {:08X}; event queued.", _npc->GetFormID());
+                NPCVisualEvents::QueueUpdate(_npc->GetFormID());
+            } catch (const std::exception& e) {
+                logger::warn("[NPCVisualUpdate] Could not compare final NPC state {:08X}: {}", _npc->GetFormID(), e.what());
+            } catch (...) {
+                logger::warn("[NPCVisualUpdate] Could not compare final NPC state {:08X}.", _npc->GetFormID());
+            }
+        }
+
+    private:
+        RE::TESNPC* _npc = nullptr;
+        std::optional<NPCVisualState> _before;
+    };
 }
 
 namespace FormUtil {
@@ -189,6 +334,7 @@ void Manager::ApplyNPCCustomizationFromJSON(RE::TESNPC* npc, const rapidjson::Do
         return;
     }
 
+    NPCVisualChangeGuard updateGuard(npc);
     std::string npcName = npc->GetFullName() ? npc->GetFullName() : "Unnamed";
     const auto headPartJsonCount = doc.HasMember("headParts") && doc["headParts"].IsArray() ? doc["headParts"].Size() : 0;
     const auto tintJsonCount = doc.HasMember("tintLayers") && doc["tintLayers"].IsArray() ? doc["tintLayers"].Size() : 0;
@@ -519,6 +665,41 @@ void Manager::PopulateAllLists(bool forceRefresh) {
         }
         _readyCallbacks.clear();
     }
+}
+
+void Manager::RefreshLists(std::string_view a_signatures) {
+    const auto includes = [a_signatures](std::string_view a_signature) {
+        std::size_t begin = 0;
+        while (begin <= a_signatures.size()) {
+            const auto end = a_signatures.find(',', begin);
+            auto token = a_signatures.substr(begin, end == std::string_view::npos ? a_signatures.size() - begin : end - begin);
+            while (!token.empty() && token.front() == ' ') token.remove_prefix(1);
+            while (!token.empty() && token.back() == ' ') token.remove_suffix(1);
+            if (token == a_signature) return true;
+            if (end == std::string_view::npos) break;
+            begin = end + 1;
+        }
+        return false;
+    };
+
+    if (a_signatures.empty() || includes("All")) {
+        PopulateAllLists(true);
+        return;
+    }
+    if (includes("HDPT")) {
+        PopulateList<RE::BGSHeadPart>("Hair", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kHair; });
+        PopulateList<RE::BGSHeadPart>("Facial Hair", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kFacialHair; });
+        PopulateList<RE::BGSHeadPart>("Eye Brows", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kEyebrows; });
+        PopulateList<RE::BGSHeadPart>("Eye", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kEyes; });
+        PopulateList<RE::BGSHeadPart>("Face", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kFace; });
+        PopulateList<RE::BGSHeadPart>("Misc", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kMisc; });
+        PopulateList<RE::BGSHeadPart>("Scar", [](RE::BGSHeadPart* hp) { return hp->type == RE::BGSHeadPart::HeadPartType::kScar; });
+    }
+    if (includes("OTFT")) PopulateList<RE::BGSOutfit>("Outfit");
+    if (includes("CLFM")) PopulateList<RE::BGSColorForm>("ColorForm");
+    if (includes("NPC_")) PopulateList<RE::TESNPC>("NPC");
+    if (includes("ARMO")) PopulateList<RE::TESObjectARMO>("Armor");
+    if (includes("VTYP")) PopulateList<RE::BGSVoiceType>("Voice");
 }
 
 const std::vector<InternalFormInfo>& Manager::GetList(const std::string& typeName) {
@@ -1243,7 +1424,12 @@ namespace {
         return IsBaseHeadGeometry(a_geometry) || (!a_geometry->name.empty() && a_names.contains(a_geometry->name.c_str()));
     }
 
-    bool CopyVerticesToRuntimeGeometry(RE::BSGeometry* a_targetGeometry, RE::BSGeometry* a_sourceGeometry, const std::string& a_context, NeckSeamPatch* a_outNeckPatch = nullptr)
+    bool CopyVerticesToRuntimeGeometry(
+        RE::BSGeometry* a_targetGeometry,
+        RE::BSGeometry* a_sourceGeometry,
+        const std::string& a_context,
+        NeckSeamPatch* a_outNeckPatch = nullptr,
+        bool a_requireMorphBindings = false)
     {
         if (a_outNeckPatch) {
             *a_outNeckPatch = {};
@@ -1267,6 +1453,21 @@ namespace {
         auto* sourceVerts = reinterpret_cast<DynVertex*>(sourceDynShape->GetDynamicTrishapeRuntimeData().dynamicData);
         if (!targetVerts || !sourceVerts) {
             logger::error("[Face Swap] Dynamic vertex buffer ausente em {}.", a_context);
+            return false;
+        }
+
+        auto* existingFod = static_cast<RE::BSFaceGenBaseMorphExtraData*>(targetDynShape->GetExtraData("FOD"));
+        auto* existingFmd = static_cast<RE::BSFaceGenModelExtraData*>(a_targetGeometry->GetExtraData("FMD"));
+        const bool hasValidFod = existingFod && existingFod->vertexData && existingFod->vertexCount == targetVertCount;
+        if (a_requireMorphBindings && (!hasValidFod || !existingFmd)) {
+            logger::error(
+                "[Face Swap] {} recusado para preservar animacao: FOD={:X} vertexData={:X} fodVertices={} targetVertices={} FMD={:X}.",
+                a_context,
+                reinterpret_cast<std::uintptr_t>(existingFod),
+                existingFod ? reinterpret_cast<std::uintptr_t>(existingFod->vertexData) : 0,
+                existingFod ? existingFod->vertexCount : 0,
+                targetVertCount,
+                reinterpret_cast<std::uintptr_t>(existingFmd));
             return false;
         }
 
@@ -1341,47 +1542,61 @@ namespace {
                 minZ, preserveEnd, blendEnd, preservedNeckVertices, blendedNeckVertices);
         }
 
-        if (targetDynShape->GetExtraData("FOD")) {
-            targetDynShape->RemoveExtraData("FOD");
-        }
-
-        auto* newFod = RE::BSFaceGenBaseMorphExtraData::Create(nullptr, false);
-        if (newFod) {
-            newFod->vertexCount = targetVertCount;
-            newFod->modelVertexCount = targetVertCount;
-            newFod->vertexData = static_cast<RE::NiPoint3*>(
-                RE::MemoryManager::GetSingleton()->Allocate(sizeof(RE::NiPoint3) * targetVertCount, 0, false));
-
+        if (hasValidFod) {
             for (std::uint32_t i = 0; i < targetVertCount; ++i) {
-                newFod->vertexData[i].x = finalVerts[i].x;
-                newFod->vertexData[i].y = finalVerts[i].y;
-                newFod->vertexData[i].z = finalVerts[i].z;
+                existingFod->vertexData[i].x = finalVerts[i].x;
+                existingFod->vertexData[i].y = finalVerts[i].y;
+                existingFod->vertexData[i].z = finalVerts[i].z;
             }
-            targetDynShape->AddExtraData(newFod);
+            logger::debug("[Face Swap] {} preservou FOD registrado ptr={:X} vertices={}.",
+                a_context,
+                reinterpret_cast<std::uintptr_t>(existingFod),
+                targetVertCount);
+        } else {
+            if (existingFod) {
+                targetDynShape->RemoveExtraData("FOD");
+            }
+
+            auto* newFod = RE::BSFaceGenBaseMorphExtraData::Create(nullptr, false);
+            if (newFod) {
+                newFod->vertexCount = targetVertCount;
+                newFod->modelVertexCount = targetVertCount;
+                newFod->vertexData = static_cast<RE::NiPoint3*>(
+                    RE::MemoryManager::GetSingleton()->Allocate(sizeof(RE::NiPoint3) * targetVertCount, 0, false));
+
+                for (std::uint32_t i = 0; i < targetVertCount; ++i) {
+                    newFod->vertexData[i].x = finalVerts[i].x;
+                    newFod->vertexData[i].y = finalVerts[i].y;
+                    newFod->vertexData[i].z = finalVerts[i].z;
+                }
+                targetDynShape->AddExtraData(newFod);
+                logger::debug("[Face Swap] {} criou FOD novo ptr={:X}; geometria nao possuia binding reutilizavel.",
+                    a_context,
+                    reinterpret_cast<std::uintptr_t>(newFod));
+            }
         }
 
-        if (auto* fmdExtra = a_targetGeometry->GetExtraData("FMD")) {
-            if (auto* fmd = static_cast<RE::BSFaceGenModelExtraData*>(fmdExtra)) {
-                if (fmd->m_model && fmd->m_model->modelMeshData && fmd->m_model->modelMeshData->faceNode) {
-                    auto* modelRoot = fmd->m_model->modelMeshData->faceNode->AsNode();
-                    if (modelRoot) {
-                        RE::BSVisit::TraverseScenegraphGeometries(modelRoot, [&](RE::BSGeometry* a_modelGeometry) {
-                            auto* modelDynShape = a_modelGeometry ? netimmerse_cast<RE::BSDynamicTriShape*>(a_modelGeometry) : nullptr;
-                            if (!modelDynShape || modelDynShape->GetTrishapeRuntimeData().vertexCount != targetVertCount) {
-                                return RE::BSVisit::BSVisitControl::kContinue;
-                            }
+        if (existingFmd) {
+            auto* fmd = existingFmd;
+            if (fmd->m_model && fmd->m_model->modelMeshData && fmd->m_model->modelMeshData->faceNode) {
+                auto* modelRoot = fmd->m_model->modelMeshData->faceNode->AsNode();
+                if (modelRoot) {
+                    RE::BSVisit::TraverseScenegraphGeometries(modelRoot, [&](RE::BSGeometry* a_modelGeometry) {
+                        auto* modelDynShape = a_modelGeometry ? netimmerse_cast<RE::BSDynamicTriShape*>(a_modelGeometry) : nullptr;
+                        if (!modelDynShape || modelDynShape->GetTrishapeRuntimeData().vertexCount != targetVertCount) {
+                            return RE::BSVisit::BSVisitControl::kContinue;
+                        }
 
-                            auto* modelVerts = reinterpret_cast<DynVertex*>(modelDynShape->GetDynamicTrishapeRuntimeData().dynamicData);
-                            if (modelVerts) {
-                                for (std::uint32_t i = 0; i < targetVertCount; ++i) {
-                                    modelVerts[i].x = finalVerts[i].x;
-                                    modelVerts[i].y = finalVerts[i].y;
-                                    modelVerts[i].z = finalVerts[i].z;
-                                }
+                        auto* modelVerts = reinterpret_cast<DynVertex*>(modelDynShape->GetDynamicTrishapeRuntimeData().dynamicData);
+                        if (modelVerts) {
+                            for (std::uint32_t i = 0; i < targetVertCount; ++i) {
+                                modelVerts[i].x = finalVerts[i].x;
+                                modelVerts[i].y = finalVerts[i].y;
+                                modelVerts[i].z = finalVerts[i].z;
                             }
-                            return RE::BSVisit::BSVisitControl::kStop;
-                        });
-                    }
+                        }
+                        return RE::BSVisit::BSVisitControl::kStop;
+                    });
                 }
             }
         }
@@ -1783,6 +1998,25 @@ namespace {
         LogShaderProperty(a_geometry, prefix);
         LogSkinInfo(a_geometry, prefix);
     }
+
+    void CollectFaceGenNodes(RE::NiAVObject* a_object, std::vector<RE::NiPointer<RE::BSFaceGenNiNode>>& a_nodes)
+    {
+        if (!a_object) {
+            return;
+        }
+
+        if (auto* faceNode = netimmerse_cast<RE::BSFaceGenNiNode*>(a_object)) {
+            a_nodes.emplace_back(faceNode);
+        }
+
+        if (auto* node = a_object->AsNode()) {
+            for (auto& child : node->GetChildren()) {
+                if (child) {
+                    CollectFaceGenNodes(child.get(), a_nodes);
+                }
+            }
+        }
+    }
 }
 
 void Manager::DumpFaceDiagnostics(RE::Actor* a_actor, RE::TESNPC* a_npc, const std::string& a_context)
@@ -1866,6 +2100,192 @@ void Manager::DumpFaceDiagnostics(RE::Actor* a_actor, RE::TESNPC* a_npc, const s
     logger::debug("[FaceDiag] ===== END {} =====", a_context);
 }
 
+bool Manager::DebugBuildFaceGenForNPC(RE::Actor* a_actor, RE::TESRace* a_race, RE::TESNPC* a_npc)
+{
+    if (!a_actor || !a_race || !a_npc) {
+        logger::warn("[BuildFaceGen Probe] Aborted: actor={:X} race={:X} npc={:X}.",
+            reinterpret_cast<std::uintptr_t>(a_actor),
+            reinterpret_cast<std::uintptr_t>(a_race),
+            reinterpret_cast<std::uintptr_t>(a_npc));
+        return false;
+    }
+
+    auto* actorNPC = a_actor->GetActorBase() ? a_actor->GetActorBase()->As<RE::TESNPC>() : nullptr;
+    auto* actor3D = a_actor->Get3D(false);
+    auto& actorRuntime = a_actor->GetActorRuntimeData();
+    auto* middleHigh = actorRuntime.currentProcess ? actorRuntime.currentProcess->middleHigh : nullptr;
+    auto* officialFaceNode = a_actor->GetFaceNodeSkinned();
+    if (actorNPC != a_npc || !actor3D || !middleHigh || !officialFaceNode || !officialFaceNode->parent) {
+        logger::warn("[BuildFaceGen Probe] Aborted: actor/NPC mismatch or official runtime face unavailable. actorNPC={:X} npc={:X} actor3D={:X} middleHigh={:X} officialFace={:X} parent={:X}.",
+            reinterpret_cast<std::uintptr_t>(actorNPC),
+            reinterpret_cast<std::uintptr_t>(a_npc),
+            reinterpret_cast<std::uintptr_t>(actor3D),
+            reinterpret_cast<std::uintptr_t>(middleHigh),
+            reinterpret_cast<std::uintptr_t>(officialFaceNode),
+            officialFaceNode ? reinterpret_cast<std::uintptr_t>(officialFaceNode->parent) : 0);
+        return false;
+    }
+
+    if (REL::Module::GetRuntime() != REL::Module::Runtime::AE) {
+        logger::warn("[BuildFaceGen Probe] Aborted: relocation ID is currently known only for AE. runtime={}.",
+            static_cast<std::uint32_t>(REL::Module::GetRuntime()));
+        return false;
+    }
+
+    using func_t = unsigned long long (*)(RE::TESRace*, void**, RE::TESNPC*, char, unsigned char);
+    static REL::Relocation<func_t> buildFaceGen{ REL::VariantID(0, 25366, 0x0) };
+    if (!buildFaceGen.address()) {
+        logger::error("[BuildFaceGen Probe] Relocation address is null for AE id 25366.");
+        return false;
+    }
+
+    const auto npcName = a_npc->GetFullName() ? a_npc->GetFullName() : "";
+    logger::debug("[BuildFaceGen Probe] BEGIN actor={:08X} npc='{}' npc={:08X} race={:08X} func={:X}.",
+        a_actor->GetFormID(),
+        npcName,
+        a_npc->GetFormID(),
+        a_race->GetFormID(),
+        buildFaceGen.address());
+
+    void* faceNodeOut = nullptr;
+    logger::debug("[BuildFaceGen Probe] BUILD shaderPass=1 param5=0 officialFaceBefore={:X} processFaceBefore={:X}.",
+        reinterpret_cast<std::uintptr_t>(officialFaceNode),
+        reinterpret_cast<std::uintptr_t>(middleHigh->faceNodeSkinned));
+    const auto result = buildFaceGen(a_race, &faceNodeOut, a_npc, 1, 0);
+    auto* generatedObject = faceNodeOut ? static_cast<RE::NiAVObject*>(faceNodeOut) : nullptr;
+    auto* generatedSkinnedNode = netimmerse_cast<RE::BSFaceGenNiNode*>(generatedObject);
+
+    RE::NiPointer<RE::BSFaceGenNiNode> faceToAttach;
+    if (generatedSkinnedNode) {
+        faceToAttach.reset(generatedSkinnedNode);
+    }
+    if (generatedObject && generatedObject->GetRefCount() > 0) {
+        generatedObject->DecRefCount();
+    }
+
+    std::uint32_t generatedGeometryCount = 0;
+    bool hasBaseHead = false;
+    if (faceToAttach) {
+        RE::BSVisit::TraverseScenegraphGeometries(faceToAttach.get(), [&](RE::BSGeometry* a_geometry) {
+            hasBaseHead = hasBaseHead || IsBaseHeadGeometry(a_geometry);
+            LogGeometryDiagnostics(a_geometry, generatedGeometryCount++);
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+    }
+
+    logger::debug("[BuildFaceGen Probe] RESULT shaderPass=1 param5=0 result={} out={:X} skinned={:X} refs={} geometries={} hasBaseHead={}.",
+        result,
+        reinterpret_cast<std::uintptr_t>(faceNodeOut),
+        reinterpret_cast<std::uintptr_t>(generatedSkinnedNode),
+        faceToAttach ? faceToAttach->GetRefCount() : 0,
+        generatedGeometryCount,
+        hasBaseHead);
+
+    if (!faceToAttach || !hasBaseHead) {
+        logger::error("[BuildFaceGen Attach] Generated node is invalid or has no base head; actor was not modified.");
+        logger::debug("[BuildFaceGen Probe] END success=false.");
+        return false;
+    }
+
+    auto* faceParent = officialFaceNode->parent;
+    faceToAttach->local = officialFaceNode->local;
+    faceToAttach->SetUserData(a_actor);
+    faceToAttach->SetAppCulled(false);
+    RE::BSVisit::TraverseScenegraphGeometries(faceToAttach.get(), [&](RE::BSGeometry* a_geometry) {
+        if (a_geometry) {
+            a_geometry->SetUserData(a_actor);
+            a_geometry->SetAppCulled(false);
+        }
+        return RE::BSVisit::BSVisitControl::kContinue;
+    });
+
+    auto& oldRuntime = officialFaceNode->GetRuntimeData();
+    auto& generatedRuntime = faceToAttach->GetRuntimeData();
+    generatedRuntime.baseRotation = oldRuntime.baseRotation;
+    generatedRuntime.lastTime = oldRuntime.lastTime;
+    logger::debug("[BuildFaceGen Attach] AnimationData generated={:X} previous={:X}.",
+        reinterpret_cast<std::uintptr_t>(generatedRuntime.animationData.get()),
+        reinterpret_cast<std::uintptr_t>(oldRuntime.animationData.get()));
+    if (!generatedRuntime.animationData) {
+        generatedRuntime.animationData = CreateFreshFaceGenAnimationData();
+        logger::debug("[BuildFaceGen Attach] Builder returned no AnimationData; created fallback={:X}.",
+            reinterpret_cast<std::uintptr_t>(generatedRuntime.animationData.get()));
+    }
+    if (generatedRuntime.animationData) {
+        generatedRuntime.animationData->Reset(0.0f, true, true, true, true);
+    }
+
+    std::vector<RE::NiPointer<RE::BSFaceGenNiNode>> previousFaceNodes;
+    CollectFaceGenNodes(actor3D, previousFaceNodes);
+    logger::debug("[BuildFaceGen Attach] Installing generated={:X} officialBefore={:X} processBefore={:X} parent={:X} geometries={} oldFaceNodes={}.",
+        reinterpret_cast<std::uintptr_t>(faceToAttach.get()),
+        reinterpret_cast<std::uintptr_t>(officialFaceNode),
+        reinterpret_cast<std::uintptr_t>(middleHigh->faceNodeSkinned),
+        reinterpret_cast<std::uintptr_t>(faceParent),
+        generatedGeometryCount,
+        previousFaceNodes.size());
+
+    faceParent->AttachChild(faceToAttach.get());
+    if (faceToAttach->parent != faceParent) {
+        logger::error("[BuildFaceGen Attach] Generated face did not attach; official face was preserved.");
+        logger::debug("[BuildFaceGen Probe] END success=false.");
+        return false;
+    }
+
+    middleHigh->faceNodeSkinned = faceToAttach.get();
+    for (const auto& oldFace : previousFaceNodes) {
+        if (oldFace && oldFace.get() != faceToAttach.get() && oldFace->parent) {
+            logger::debug("[BuildFaceGen Attach] Detaching previous face={:X} parent={:X}.",
+                reinterpret_cast<std::uintptr_t>(oldFace.get()),
+                reinterpret_cast<std::uintptr_t>(oldFace->parent));
+            oldFace->parent->DetachChild(oldFace.get());
+        }
+    }
+
+    faceToAttach->FixSkinInstances(actor3D->AsNode(), false);
+    RE::NiUpdateData updateData{};
+    updateData.time = generatedRuntime.lastTime;
+    faceToAttach->UpdateWorldData(&updateData);
+    UpdateFaceNodeBounds(faceToAttach.get());
+
+    a_actor->UpdateSkinColor();
+    a_actor->UpdateHairColor();
+    a_npc->UpdateNeck(faceToAttach.get());
+    if (auto* queue = RE::TaskQueueInterface::GetSingleton()) {
+        queue->QueueUpdateNiObject(actor3D);
+    } else {
+        logger::warn("[BuildFaceGen Attach] TaskQueueInterface unavailable for QueueUpdateNiObject.");
+    }
+
+    std::uint32_t runtimeGeometryCount = 0;
+    RE::BSVisit::TraverseScenegraphGeometries(faceToAttach.get(), [&](RE::BSGeometry* a_geometry) {
+        LogGeometryDiagnostics(a_geometry, runtimeGeometryCount++);
+        return RE::BSVisit::BSVisitControl::kContinue;
+    });
+    const auto* officialAfter = a_actor->GetFaceNodeSkinned();
+    const auto* actorAnimationAfter = a_actor->GetFaceGenAnimationData();
+    auto* sceneFaceAfter = netimmerse_cast<RE::BSFaceGenNiNode*>(actor3D->GetObjectByName("BSFaceGenNiNodeSkinned"));
+    logger::debug("[BuildFaceGen Attach] Installed generated={:X} officialAfter={:X} processAfter={:X} sceneAfter={:X} animationGenerated={:X} animationActor={:X} parent={:X} geometries={}.",
+        reinterpret_cast<std::uintptr_t>(faceToAttach.get()),
+        reinterpret_cast<std::uintptr_t>(officialAfter),
+        reinterpret_cast<std::uintptr_t>(middleHigh->faceNodeSkinned),
+        reinterpret_cast<std::uintptr_t>(sceneFaceAfter),
+        reinterpret_cast<std::uintptr_t>(generatedRuntime.animationData.get()),
+        reinterpret_cast<std::uintptr_t>(actorAnimationAfter),
+        reinterpret_cast<std::uintptr_t>(faceToAttach->parent),
+        runtimeGeometryCount);
+    DumpFaceDiagnostics(a_actor, a_npc, "BuildFaceGen Attach After");
+    const bool success = officialAfter == faceToAttach.get() &&
+                         middleHigh->faceNodeSkinned == faceToAttach.get() &&
+                         sceneFaceAfter == faceToAttach.get() &&
+                         actorAnimationAfter == generatedRuntime.animationData.get();
+    if (success) {
+        NPCVisualEvents::QueueUpdate(a_npc->GetFormID());
+    }
+    logger::debug("[BuildFaceGen Probe] END success={}.", success);
+    return success;
+}
+
 void Manager::ClearFaceGenGeometryIndex()
 {
     _faceGenGeometryIndex.clear();
@@ -1912,7 +2332,22 @@ void Manager::IndexFaceGenNif(const std::string& nifPath, RE::FormID originFormI
         return RE::BSVisit::BSVisitControl::kContinue;
     });
 
-    logger::debug("[FaceGen Index] Indexed {} baked geometries from '{}'.", indexedInFile, nifPath);
+    logger::debug("[FaceGen Index] Indexed {} baked geometries from '{}'", indexedInFile, nifPath);
+}
+
+void Manager::AddIndexedFaceGenGeometry(const FaceGenGeometrySource& source)
+{
+    if (source.geometryName.empty() || source.nifPath.empty()) {
+        return;
+    }
+
+    const auto key = NormalizeGeometryKey(source.geometryName);
+    if (_faceGenGeometryIndex.contains(key)) {
+        ++_faceGenGeometryDuplicates;
+        return;
+    }
+
+    _faceGenGeometryIndex.emplace(key, source);
 }
 
 bool Manager::FindIndexedFaceGenGeometry(const std::string& geometryName, FaceGenGeometrySource& outSource) const
@@ -1924,6 +2359,16 @@ bool Manager::FindIndexedFaceGenGeometry(const std::string& geometryName, FaceGe
 
     outSource = it->second;
     return true;
+}
+
+std::vector<FaceGenGeometrySource> Manager::GetFaceGenGeometryIndexEntries() const
+{
+    std::vector<FaceGenGeometrySource> entries;
+    entries.reserve(_faceGenGeometryIndex.size());
+    for (const auto& [_, source] : _faceGenGeometryIndex) {
+        entries.push_back(source);
+    }
+    return entries;
 }
 
 std::size_t Manager::GetFaceGenGeometryIndexSize() const
@@ -2039,9 +2484,22 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
         return;
     }
 
-    auto* targetHeadGeometry = targetHeadGeometries.front().get();
+    auto* generatedHeadGeometry = targetHeadGeometries.front().get();
+    auto* targetHeadGeometry = generatedHeadGeometry;
+    auto* registeredFod = generatedHeadGeometry->GetExtraData("FOD");
+    auto* registeredFmd = generatedHeadGeometry->GetExtraData("FMD");
+    auto* registeredAnimationData = faceNode->GetRuntimeData().animationData.get();
     NeckSeamPatch neckSeamPatch;
-    if (CopyVerticesToRuntimeGeometry(targetHeadGeometry, sourceHeadIt->get(), "head", &neckSeamPatch)) {
+    if (CopyVerticesToRuntimeGeometry(targetHeadGeometry, sourceHeadIt->get(), "registered-head", nullptr, true)) {
+        auto* registeredDynShape = netimmerse_cast<RE::BSDynamicTriShape*>(targetHeadGeometry);
+        logger::debug("[Face Swap] Head gerada preservada e deformada in-place: '{}' ptr={:X} vertices={} FOD={:X} FMD={:X} animationData={:X}.",
+            targetHeadGeometry->name.empty() ? "SemNome" : targetHeadGeometry->name.c_str(),
+            reinterpret_cast<std::uintptr_t>(targetHeadGeometry),
+            registeredDynShape ? registeredDynShape->GetTrishapeRuntimeData().vertexCount : 0,
+            reinterpret_cast<std::uintptr_t>(registeredFod),
+            reinterpret_cast<std::uintptr_t>(registeredFmd),
+            reinterpret_cast<std::uintptr_t>(registeredAnimationData));
+
         std::size_t adjustedParts = 0;
         std::unordered_set<RE::BSGeometry*> consumedSources;
         consumedSources.insert(sourceHeadIt->get());
@@ -2074,7 +2532,7 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
         std::vector<ClonedFaceGeometry> bakedExtras;
         std::unordered_set<std::string> sourceBakedExtraNames;
         std::unordered_set<std::string> attachedBakedExtraNames;
-        auto* runtimeHeadMaterialSource = targetHeadGeometries.front().get();
+        auto* runtimeHeadMaterialSource = generatedHeadGeometry;
         auto cloneBakedExtra = [&](RE::BSGeometry* source, RE::NiAVObject* sourceRoot, RE::NiNode* defaultTargetParent, const std::string& sourceLabel) {
             if (!source || source->name.empty()) {
                 return false;
@@ -2248,6 +2706,20 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
             logger::warn("[Face Swap] UpdateNeck pulado: npc null.");
         }
 
+        if (CopyVerticesToRuntimeGeometry(targetHeadGeometry, sourceHeadIt->get(), "registered-head-post-neck", nullptr, true)) {
+            logger::debug("[Face Swap] Deformacao exata restaurada in-place apos UpdateNeck: '{}'.",
+                targetHeadGeometry->name.empty() ? "SemNome" : targetHeadGeometry->name.c_str());
+            RE::NiUpdateData authoritativeUpdate{};
+            authoritativeUpdate.time = faceNode->GetRuntimeData().lastTime;
+            faceNode->UpdateWorldData(&authoritativeUpdate);
+            UpdateFaceNodeBounds(faceNode);
+            if (auto* queue = RE::TaskQueueInterface::GetSingleton()) {
+                queue->QueueUpdateNiObject(actor3D);
+            }
+        } else {
+            logger::warn("[Face Swap] Nao foi possivel restaurar a deformacao exata da head apos UpdateNeck.");
+        }
+
         if (!neckSeamPatch.empty()) {
             logger::debug("[Face Swap] Applying immediate neck seam patch...");
             ApplyNeckSeamPatchToGeometry(targetHeadGeometry, neckSeamPatch, "post UpdateNeck imediato");
@@ -2315,7 +2787,22 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
             scheduleDelayedNeckPatch(360);
         }
 
-        logger::debug("[Face Swap] Head morph aplicado na geometria original do ator: '{}' -> '{}'.",
+        const auto* finalFod = targetHeadGeometry->GetExtraData("FOD");
+        const auto* finalFmd = targetHeadGeometry->GetExtraData("FMD");
+        const auto* finalAnimationData = faceNode->GetRuntimeData().animationData.get();
+        const auto* actorAnimationData = a_actor->GetFaceGenAnimationData();
+        const bool preservedBindings = finalFod == registeredFod &&
+                                       finalFmd == registeredFmd &&
+                                       finalAnimationData == registeredAnimationData &&
+                                       actorAnimationData == registeredAnimationData;
+        logger::debug("[Face Swap] Bindings apos deformacao: geometry={:X} FOD={:X} FMD={:X} nodeAnimation={:X} actorAnimation={:X} preserved={}.",
+            reinterpret_cast<std::uintptr_t>(targetHeadGeometry),
+            reinterpret_cast<std::uintptr_t>(finalFod),
+            reinterpret_cast<std::uintptr_t>(finalFmd),
+            reinterpret_cast<std::uintptr_t>(finalAnimationData),
+            reinterpret_cast<std::uintptr_t>(actorAnimationData),
+            preservedBindings);
+        logger::debug("[Face Swap] Head da NIF aplicada na geometria registrada: '{}' -> '{}'.",
             (*sourceHeadIt)->name.empty() ? "SemNome" : (*sourceHeadIt)->name.c_str(),
             targetHeadGeometry->name.empty() ? "SemNome" : targetHeadGeometry->name.c_str());
         logger::debug("[Face Swap] Partes faciais reposicionadas: {}", adjustedParts);
@@ -2325,13 +2812,19 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
         return;
     }
 
-    logger::warn("[Face Swap] Head morph direto falhou; usando clone fallback experimental.");
+    logger::error("[Face Swap] Deformacao in-place da head falhou; clone fallback sera bloqueado quando houver AnimationData.");
+    if (registeredAnimationData) {
+        return;
+    }
+
+    logger::warn("[Face Swap] Face node sem AnimationData; usando clone fallback completo apenas porque nao ha binding de animacao para preservar.");
 
     std::vector<ClonedFaceGeometry> pending;
     std::unordered_set<std::string> replacementNames;
     std::unordered_set<std::uint16_t> replacementSlots;
     NeckSeamPatch fallbackNeckSeamPatch;
     std::string fallbackNeckHeadName;
+    RE::BSGeometry* fallbackAuthoritativeSourceHead = nullptr;
     RE::BSGeometry* fallbackRuntimeHeadMaterialSource = nullptr;
     RE::BSVisit::TraverseScenegraphGeometries(faceNode, [&](RE::BSGeometry* a_geometry) {
         if (!fallbackRuntimeHeadMaterialSource && IsBaseHeadGeometry(a_geometry)) {
@@ -2373,13 +2866,9 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
         clone->local = source->local;
         clone->SetUserData(a_actor);
         clone->SetAppCulled(false);
-        if (fallbackRuntimeHeadMaterialSource && IsBaseHeadGeometry(clone.get())) {
-            NeckSeamPatch candidatePatch;
-            if (BuildMismatchedTopologyNeckPatch(fallbackRuntimeHeadMaterialSource, clone.get(), candidatePatch)) {
-                fallbackNeckSeamPatch = std::move(candidatePatch);
-                fallbackNeckHeadName = clone->name.empty() ? "" : clone->name.c_str();
-                ApplyNeckSeamPatchToGeometry(clone.get(), fallbackNeckSeamPatch, "fallback pre-attach");
-            }
+        if (IsBaseHeadGeometry(clone.get())) {
+            fallbackAuthoritativeSourceHead = source.get();
+            fallbackNeckHeadName = clone->name.empty() ? "" : clone->name.c_str();
         }
         RememberReplacementGeometry(clone.get(), replacementNames, replacementSlots);
         pending.push_back({ std::move(clone), targetParent });
@@ -2441,6 +2930,31 @@ void Manager::DeformFaceToMatchNif(RE::Actor* a_actor, const std::string& a_nifP
         }
     } else {
         logger::warn("[Face Swap] Fallback UpdateNeck pulado: actor base null.");
+    }
+
+    if (fallbackAuthoritativeSourceHead) {
+        RE::BSGeometry* authoritativeHead = nullptr;
+        RE::BSVisit::TraverseScenegraphGeometries(faceNode, [&](RE::BSGeometry* a_geometry) {
+            if (IsBaseHeadGeometry(a_geometry) && !a_geometry->GetAppCulled()) {
+                if (fallbackNeckHeadName.empty() ||
+                    (!a_geometry->name.empty() && fallbackNeckHeadName == a_geometry->name.c_str())) {
+                    authoritativeHead = a_geometry;
+                    return RE::BSVisit::BSVisitControl::kStop;
+                }
+            }
+            return RE::BSVisit::BSVisitControl::kContinue;
+        });
+
+        if (CopyVerticesToRuntimeGeometry(authoritativeHead, fallbackAuthoritativeSourceHead, "authoritative-head")) {
+            logger::debug("[Face Swap] Fallback restaurou a deformacao exata da head NIF apos UpdateNeck.");
+            RE::NiUpdateData authoritativeUpdate{};
+            authoritativeUpdate.time = faceNode->GetRuntimeData().lastTime;
+            faceNode->UpdateWorldData(&authoritativeUpdate);
+            UpdateFaceNodeBounds(faceNode);
+            if (auto* queue = RE::TaskQueueInterface::GetSingleton()) {
+                queue->QueueUpdateNiObject(actor3D);
+            }
+        }
     }
 
     if (!fallbackNeckSeamPatch.empty()) {
@@ -2592,13 +3106,25 @@ void Manager::RegisterAffectedNPC(RE::FormID baseID, const std::string& nifPath)
         return;
     }
 
+    const auto existing = _affectedNPCs.find(baseID);
+    if (existing != _affectedNPCs.end() && existing->second == nifPath) {
+        logger::debug("[AffectedNPC] Register sem mudanca base={:08X} nif='{}'", baseID, nifPath);
+        return;
+    }
+
     logger::debug("[AffectedNPC] Register base={:08X} nif='{}'", baseID, nifPath);
     _affectedNPCs[baseID] = nifPath;
+    NPCVisualEvents::QueueUpdate(baseID);
 }
 
 void Manager::UnregisterAffectedNPC(RE::FormID baseID) {
+    if (_affectedNPCs.erase(baseID) == 0) {
+        logger::debug("[AffectedNPC] Unregister sem mudanca base={:08X}", baseID);
+        return;
+    }
+
     logger::debug("[AffectedNPC] Unregister base={:08X}", baseID);
-    _affectedNPCs.erase(baseID);
+    NPCVisualEvents::QueueUpdate(baseID);
 }
 
 void Manager::ClearAffectedNPCs() {

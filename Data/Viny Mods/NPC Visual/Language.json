@@ -3,9 +3,21 @@
     "menu.presets": "Presets",
     "menu.database": "Database",
     "menu.export": "Export",
+    "menu.debug": "Debug",
     "export.title": "Export Package",
     "export.description": "Select presets and NPC edits to export into one ZIP package.",
     "export.refresh": "Refresh Lists",
     "export.export_selected": "Export Selected",
-    "export.output_hint": "ZIP files are saved to Data/Viny Mods/NPC Visual/Export."
+    "export.output_hint": "ZIP files are saved to Data/Viny Mods/NPC Visual/Export.",
+    "debug.title": "Debug Tools",
+    "debug.reload_data": "Reload Data",
+    "debug.reload_data_hint": "Refreshes the internal form database. Use this after dynamic form mods have injected or updated forms.",
+    "debug.rebuild_facegen_cache": "Rebuild FaceGen Cache",
+    "debug.rebuild_facegen_cache_hint": "Forces NPC Visual to reopen FaceGen NIFs and rebuild the baked geometry cache.",
+    "debug.facegen_cache_status": "FaceGen cache: %u faces, %u baked geometries, %u duplicate geometries ignored.",
+    "debug.test_build_facegen": "Build and Install FaceGen on Actor",
+    "debug.test_build_facegen_hint": "Experimental: applies the current Editor values to the TESNPC, builds one FaceGen node, installs it as the actor's official face, then applies the selected FaceGeom NIF deformation when available.",
+    "debug.test_build_facegen_no_npc": "Load an actor in the Editor tab before building and installing FaceGen.",
+    "debug.apply_editor_to_tesnpc": "Apply Editor Data to TESNPC",
+    "debug.apply_editor_to_tesnpc_hint": "Applies the current Editor values directly to the TESNPC base form without resetting or modifying the actor's loaded 3D."
 }

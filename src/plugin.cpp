@@ -8,7 +8,42 @@
 #include <string>
 
 namespace {
+    bool hasDFG = false;
+
     void RefreshActorByFormID(RE::FormID actorID, std::string nifPath, const std::string& reason);
+
+    class DynamicFormsGeneratorListener : public RE::BSTEventSink<SKSE::ModCallbackEvent> {
+    public:
+        static DynamicFormsGeneratorListener* GetSingleton()
+        {
+            static DynamicFormsGeneratorListener singleton;
+            return &singleton;
+        }
+
+        void Register()
+        {
+            if (auto dispatcher = SKSE::GetModCallbackEventSource()) {
+                dispatcher->AddEventSink(this);
+            }
+        }
+
+        RE::BSEventNotifyControl ProcessEvent(const SKSE::ModCallbackEvent* a_event, RE::BSTEventSource<SKSE::ModCallbackEvent>*) override
+        {
+            if (!a_event) return RE::BSEventNotifyControl::kContinue;
+
+            std::string_view eventName = a_event->eventName.c_str();
+            if (eventName == "DynamicFormsGeneratorLoaded") {
+                Manager::GetSingleton()->PopulateAllLists();
+                return RE::BSEventNotifyControl::kContinue;
+            }
+            if (eventName == "DynamicFormsGeneratorUpdated") {
+                Manager::GetSingleton()->RefreshLists(a_event->strArg.c_str());
+                return RE::BSEventNotifyControl::kContinue;
+            }
+
+            return RE::BSEventNotifyControl::kContinue;
+        }
+    };
 
     void RefreshLoadedAffectedActors(const std::string& reason)
     {
@@ -66,17 +101,6 @@ namespace {
             auto* taskInterface = SKSE::GetTaskInterface();
             if (!taskInterface) {
                 logger::warn("[RuntimeRefresh] TaskInterface ausente; executando direto reason={} delayMs={}", reason, delayMs);
-                auto* manager = Manager::GetSingleton();
-                if (manager && !manager->_isPopulated) {
-                    logger::debug("[RuntimeRefresh] PopulateAllLists BEGIN alreadyPopulated=false reason={}", reason);
-                    manager->PopulateAllLists();
-                    logger::debug("[RuntimeRefresh] PopulateAllLists END reason={}", reason);
-                }
-                else {
-                    logger::debug("[RuntimeRefresh] PopulateAllLists SKIP alreadyPopulated={} reason={}",
-                        manager ? manager->_isPopulated : false,
-                        reason);
-                }
                 if (loadSavedData) {
                     logger::debug("[RuntimeRefresh] LoadSavedData BEGIN reason={}", reason);
                     NSettings::Load();
@@ -93,17 +117,6 @@ namespace {
 
             taskInterface->AddTask([reason, delayMs, loadSavedData]() {
                 logger::info("[RuntimeRefresh] BEGIN reason={} delayMs={} loadSavedData={}", reason, delayMs, loadSavedData);
-                auto* manager = Manager::GetSingleton();
-                if (manager && !manager->_isPopulated) {
-                    logger::debug("[RuntimeRefresh] PopulateAllLists BEGIN alreadyPopulated=false reason={}", reason);
-                    manager->PopulateAllLists();
-                    logger::debug("[RuntimeRefresh] PopulateAllLists END reason={}", reason);
-                }
-                else {
-                    logger::debug("[RuntimeRefresh] PopulateAllLists SKIP alreadyPopulated={} reason={}",
-                        manager ? manager->_isPopulated : false,
-                        reason);
-                }
                 if (loadSavedData) {
                     logger::debug("[RuntimeRefresh] LoadSavedData BEGIN reason={}", reason);
                     NSettings::Load();
@@ -122,6 +135,12 @@ namespace {
 }
 
 void OnMessage(SKSE::MessagingInterface::Message* message) {
+    if (message->type == SKSE::MessagingInterface::kPostLoad) {
+        hasDFG = GetModuleHandleA("DynamicFormsGenerator.dll") != nullptr;
+        if (hasDFG) {
+            logger::info("DynamicFormsGenerator.dll found!");
+        }
+    }
     if (message->type == SKSE::MessagingInterface::kDataLoaded) {
         logger::debug("[MainMenuBoot] DataLoaded BEGIN");
         logger::debug("[MainMenuBoot] AllocTrampoline BEGIN");
@@ -133,7 +152,10 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         logger::debug("[MainMenuBoot] Load3DHook::Install BEGIN");
         Load3DHook::Install();
         logger::debug("[MainMenuBoot] Load3DHook::Install END");
-        logger::debug("[MainMenuBoot] Saved JSON load deferred until NewGame/PostLoadGame");
+        if (!hasDFG) {
+            Manager::GetSingleton()->PopulateAllLists();
+        }
+        logger::debug("[MainMenuBoot] Saved JSON load deferred until NewGame / PostLoadGame");
         logger::debug("[MainMenuBoot] DataLoaded END");
     }
     if (message->type == SKSE::MessagingInterface::kNewGame || message->type == SKSE::MessagingInterface::kPostLoadGame) {
@@ -146,6 +168,7 @@ SKSEPluginLoad(const SKSE::LoadInterface *skse) {
     SetupLog();
     logger::info("Plugin loaded");
     SKSE::Init(skse);
+    DynamicFormsGeneratorListener::GetSingleton()->Register();
     SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
     return true;
 }

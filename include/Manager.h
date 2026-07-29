@@ -104,6 +104,7 @@ public:
     bool IsNPCAffected(RE::FormID baseID, std::string& outNifPath);
 
     void PopulateAllLists(bool forceRefresh = false);
+    void RefreshLists(std::string_view a_signatures);
     static std::string ToUTF8(std::string_view a_str);
     // Data Store: Map of "TypeName" -> List of InternalFormInfo
     // We use this to feed the UI
@@ -117,9 +118,12 @@ public:
     static void ScheduleFaceDeform(RE::FormID actorID, const std::string& nifPath, int retries = 40);
     static RE::BGSHeadPart* ExtractHeadPartFromNif(const std::string& a_nifPath);
     static void DumpFaceDiagnostics(RE::Actor* a_actor, RE::TESNPC* a_npc, const std::string& a_context);
+    static bool DebugBuildFaceGenForNPC(RE::Actor* a_actor, RE::TESRace* a_race, RE::TESNPC* a_npc);
     void ClearFaceGenGeometryIndex();
     void IndexFaceGenNif(const std::string& nifPath, RE::FormID originFormID);
+    void AddIndexedFaceGenGeometry(const FaceGenGeometrySource& source);
     bool FindIndexedFaceGenGeometry(const std::string& geometryName, FaceGenGeometrySource& outSource) const;
+    std::vector<FaceGenGeometrySource> GetFaceGenGeometryIndexEntries() const;
     std::size_t GetFaceGenGeometryIndexSize() const;
     std::size_t GetFaceGenGeometryDuplicateCount() const;
     bool _isPopulated = false;

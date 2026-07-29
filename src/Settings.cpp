@@ -6,6 +6,7 @@ const char* NPCPath = "Data/Viny Mods/NPC Visual/NPC";
 const char* PresetsPath = "Data/Viny Mods/NPC Visual/Presets";
 const char* ExportPath = "Data/Viny Mods/NPC Visual/Export";
 const char* LanguagePath = "Data/Viny Mods/NPC Visual/Language.json";
+const char* FaceGenCachePath = "Data/Viny Mods/NPC Visual/FaceGenCache.json";
 
 const char* LegacyBasePath = "Data/SKSE/Plugins/NPC Replacer";
 const char* LegacyNPCPath = "Data/SKSE/Plugins/NPC Replacer/NPC";
@@ -66,6 +67,14 @@ static void WriteDefaultLanguageFile()
     ensureString("debug.title", "Debug Tools");
     ensureString("debug.reload_data", "Reload Data");
     ensureString("debug.reload_data_hint", "Refreshes the internal form database. Use this after dynamic form mods have injected or updated forms.");
+    ensureString("debug.rebuild_facegen_cache", "Rebuild FaceGen Cache");
+    ensureString("debug.rebuild_facegen_cache_hint", "Forces NPC Visual to reopen FaceGen NIFs and rebuild the baked geometry cache.");
+    ensureString("debug.facegen_cache_status", "FaceGen cache: %u faces, %u baked geometries, %u duplicate geometries ignored.");
+    ensureString("debug.test_build_facegen", "Build and Install FaceGen on Actor");
+    ensureString("debug.test_build_facegen_hint", "Experimental: applies the current Editor values to the TESNPC, builds one FaceGen node, installs it as the actor's official face, then applies the selected FaceGeom NIF deformation when available.");
+    ensureString("debug.test_build_facegen_no_npc", "Load an actor in the Editor tab before building and installing FaceGen.");
+    ensureString("debug.apply_editor_to_tesnpc", "Apply Editor Data to TESNPC");
+    ensureString("debug.apply_editor_to_tesnpc_hint", "Applies the current Editor values directly to the TESNPC base form without resetting or modifying the actor's loaded 3D.");
 
     FILE* fp = nullptr;
     fopen_s(&fp, LanguagePath, "wb");
@@ -616,27 +625,29 @@ struct CustomFaceInfo {
     std::string displayPath;
     std::string displayName;
     RE::FormID originFormID;
-    void* textureID;
+    void* textureID = nullptr;
 };
+
+struct FaceGenNifFileInfo {
+    std::filesystem::path fullPath;
+    std::string nifPath;
+    std::string displayPath;
+    std::string displayName;
+    RE::FormID originFormID = 0;
+    std::uintmax_t fileSize = 0;
+    std::int64_t writeTime = 0;
+};
+
 static std::vector<CustomFaceInfo> scannedFaces;
 static bool needFaceScan = true;
 static bool openFaceSelectModal = false;
 static bool refreshListsOnNextMenuOpen = true;
 static int lastNPCVisualRenderFrame = -1;
 
-void ScanFaceGeom();
+void ScanFaceGeom(bool forceRebuildCache = false);
 
 void EnsureMenuListsPopulated()
 {
-    auto* manager = Manager::GetSingleton();
-    if (!manager->_isPopulated) {
-        logger::debug("[MenuPopulate] PopulateAllLists BEGIN reason=menu_open");
-        manager->PopulateAllLists();
-        logger::debug("[MenuPopulate] PopulateAllLists END reason=menu_open");
-    }
-    else {
-        logger::debug("[MenuPopulate] PopulateAllLists SKIP alreadyPopulated=true reason=menu_open");
-    }
 }
 
 static std::string NormalizeGamePath(std::string path)
@@ -1815,23 +1826,148 @@ void RestoreDefaultNPC() {
     logger::info("Restored {} to absolute default (JSON deleted and Base Form reverted).", editorID);
 }
 
-void ScanFaceGeom() {
-    scannedFaces.clear();
-    auto* manager = Manager::GetSingleton();
-    manager->ClearFaceGenGeometryIndex();
+static std::int64_t GetFileWriteTimeForCache(const std::filesystem::path& path)
+{
+    std::error_code ec;
+    const auto value = std::filesystem::last_write_time(path, ec);
+    return ec ? 0 : static_cast<std::int64_t>(value.time_since_epoch().count());
+}
+
+static bool IsNifPath(const std::filesystem::path& path)
+{
+    auto ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return ext == ".nif";
+}
+
+static FaceGenNifFileInfo BuildFaceGenFileInfo(const std::filesystem::path& path)
+{
+    FaceGenNifFileInfo info;
+    info.fullPath = path;
+
+    std::string normalizedPath = path.string();
+    std::replace(normalizedPath.begin(), normalizedPath.end(), '/', '\\');
+
+    const auto meshPos = normalizedPath.find("meshes\\");
+    info.nifPath = meshPos != std::string::npos ? normalizedPath.substr(meshPos) : normalizedPath;
+
+    const auto faceGeomPos = normalizedPath.find("FaceGeom\\");
+    info.displayPath = faceGeomPos != std::string::npos ? normalizedPath.substr(faceGeomPos + 9) : info.nifPath;
+
+    const std::string stem = path.stem().string();
+    const std::string pluginFolder = path.parent_path().filename().string();
+    bool isStrictHex = !stem.empty() && stem.length() <= 8;
+    for (const char c : stem) {
+        if (!std::isxdigit(static_cast<unsigned char>(c))) {
+            isStrictHex = false;
+            break;
+        }
+    }
+
+    if (isStrictHex) {
+        const auto rawID = static_cast<std::uint32_t>(std::stoul(stem, nullptr, 16));
+        if (auto* dataHandler = RE::TESDataHandler::GetSingleton()) {
+            if (const RE::TESFile* modFile = dataHandler->LookupModByName(pluginFolder)) {
+                const auto localID = modFile->IsLight() ? (rawID & 0x00000FFF) : (rawID & 0x00FFFFFF);
+                info.originFormID = dataHandler->LookupFormID(localID, pluginFolder);
+            }
+        }
+
+        if (info.originFormID == 0) {
+            info.originFormID = rawID;
+        }
+
+        if (auto* npc = RE::TESForm::LookupByID<RE::TESNPC>(info.originFormID)) {
+            info.displayName = std::format("{} [{:08X}]", npc->GetFullName() ? npc->GetFullName() : "Unnamed", info.originFormID);
+        }
+        else {
+            info.displayName = std::format("{} [{:08X}]", pluginFolder.empty() ? "FaceGeom" : pluginFolder, info.originFormID);
+        }
+    }
+    else {
+        logger::debug("[ScanFaceGeom] Custom Face detected (Non-FormID): {}", stem);
+        info.displayName = stem;
+    }
+
+    std::error_code ec;
+    info.fileSize = std::filesystem::file_size(path, ec);
+    if (ec) {
+        info.fileSize = 0;
+    }
+    info.writeTime = GetFileWriteTimeForCache(path);
+    return info;
+}
+
+static std::size_t AppendFaceGenFilesFromNPCRecords(
+    const std::filesystem::path& geomPath,
+    std::vector<FaceGenNifFileInfo>& files)
+{
+    auto* dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler) {
+        return 0;
+    }
+
+    std::set<std::string> collectedPaths;
+    for (const auto& file : files) {
+        collectedPaths.insert(NormalizeGamePath(file.nifPath));
+    }
+
+    std::size_t added = 0;
+    std::error_code ec;
+    for (auto* npc : dataHandler->GetFormArray<RE::TESNPC>()) {
+        if (!npc) {
+            continue;
+        }
+
+        const auto* originFile = FormUtil::GetMasterFile(npc);
+        if (!originFile || originFile->GetFilename().empty()) {
+            continue;
+        }
+
+        const auto localID = originFile->IsLight() ?
+                                 (npc->GetFormID() & 0x00000FFF) :
+                                 (npc->GetFormID() & 0x00FFFFFF);
+        const auto candidate = geomPath /
+                               std::string(originFile->GetFilename()) /
+                               std::format("{:08X}.nif", localID);
+
+        ec.clear();
+        if (!std::filesystem::is_regular_file(candidate, ec) || ec) {
+            continue;
+        }
+
+        auto info = BuildFaceGenFileInfo(candidate);
+        const auto pathKey = NormalizeGamePath(info.nifPath);
+        if (!collectedPaths.insert(pathKey).second) {
+            continue;
+        }
+
+        info.originFormID = npc->GetFormID();
+        info.displayName = std::format(
+            "{} [{:08X}]",
+            npc->GetFullName() ? npc->GetFullName() : "Unnamed",
+            npc->GetFormID());
+        files.push_back(std::move(info));
+        ++added;
+    }
+
+    return added;
+}
+
+static std::vector<FaceGenNifFileInfo> CollectFaceGenNifFiles()
+{
+    std::vector<FaceGenNifFileInfo> files;
     std::filesystem::path geomPath = "Data/meshes/actors/character/FaceGenData/FaceGeom";
 
     std::error_code ec;
     if (!std::filesystem::exists(geomPath, ec) || ec) {
         logger::warn("[ScanFaceGeom] FaceGeom path does not exist or cannot be accessed.");
-        return;
+        return files;
     }
 
-    logger::debug("[ScanFaceGeom] Starting FaceGeom scan...");
-
-    // Adiciona flag para pular arquivos/pastas sem permiss�o
-    auto options = std::filesystem::directory_options::skip_permission_denied;
-
+    const auto options = std::filesystem::directory_options::skip_permission_denied;
     for (auto it = std::filesystem::recursive_directory_iterator(geomPath, options, ec);
         it != std::filesystem::recursive_directory_iterator();
         it.increment(ec)) {
@@ -1841,121 +1977,247 @@ void ScanFaceGeom() {
             continue;
         }
 
-        if (it->is_regular_file() && it->path().extension() == ".nif") {
-            CustomFaceInfo info;
-
-            try {
-                // A convers�o .string() foi movida para DENTRO do try. 
-                // Evita o crash "No mapping for the Unicode character"
-                std::string fullPath = it->path().string();
-
-                // Log detalhado para rastrear onde o scanner est� (pode mudar para logger::info se preferir)
-                logger::debug("[ScanFaceGeom] Analyzing NIF: {}", fullPath);
-
-                std::string normalizedPath = fullPath;
-                std::replace(normalizedPath.begin(), normalizedPath.end(), '/', '\\');
-
-                // 1. Path Relativo para a Game Engine
-                size_t meshPos = normalizedPath.find("meshes\\");
-                if (meshPos != std::string::npos) info.nifPath = normalizedPath.substr(meshPos);
-                else info.nifPath = normalizedPath;
-
-                // 2. Path para a UI
-                size_t faceGeomPos = normalizedPath.find("FaceGeom\\");
-                if (faceGeomPos != std::string::npos) {
-                    info.displayPath = normalizedPath.substr(faceGeomPos + 9);
-                }
-                else {
-                    info.displayPath = info.nifPath;
-                }
-
-                // 3. Resolu��o do Nome
-                std::string stem = it->path().stem().string();
-                std::string pluginFolder = it->path().parent_path().filename().string();
-
-                info.originFormID = 0;
-
-                // --- CHECAGEM ESTRITA DE HEXADECIMAL ---
-                // Verifica se o nome � 100% FormID. Evita que nomes como "bela_rosto" 
-                // sejam lidos parcialmente como hex (0xBE).
-                bool isStrictHex = true;
-                if (stem.empty() || stem.length() > 8) {
-                    isStrictHex = false;
-                }
-                else {
-                    for (char c : stem) {
-                        if (!std::isxdigit(static_cast<unsigned char>(c))) {
-                            isStrictHex = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (isStrictHex) {
-                    // � um FormID de NPC
-                    uint32_t rawID = std::stoul(stem, nullptr, 16);
-                    auto dataHandler = RE::TESDataHandler::GetSingleton();
-
-                    if (dataHandler) {
-                        const RE::TESFile* modFile = dataHandler->LookupModByName(pluginFolder);
-                        if (modFile) {
-                            uint32_t localID = 0;
-
-                            if (modFile->IsLight()) {
-                                localID = rawID & 0x00000FFF;
-                            }
-                            else {
-                                localID = rawID & 0x00FFFFFF;
-                            }
-
-                            info.originFormID = dataHandler->LookupFormID(localID, pluginFolder);
-                        }
-                    }
-
-                    if (info.originFormID == 0) info.originFormID = rawID;
-
-                    if (auto npc = RE::TESForm::LookupByID<RE::TESNPC>(info.originFormID)) {
-                        info.displayName = std::format("{} [{:08X}]", npc->GetFullName() ? npc->GetFullName() : "Unnamed", info.originFormID);
-                    }
-                    else {
-                        info.displayName = std::format("{} [{:08X}]", pluginFolder.empty() ? "FaceGeom" : pluginFolder, info.originFormID);
-                    }
-                }
-                else {
-                    // � UM ARQUIVO COM NOME CUSTOMIZADO (Ex: "Rosto_da_Lydia")
-                    logger::debug("[ScanFaceGeom] Custom Face detected (Non-FormID): {}", stem);
-                    info.originFormID = 0;
-                    info.displayName = stem;
-                }
-
-                // Carregamento de Textura (PNG)
-                std::filesystem::path pngPath = it->path();
-                pngPath.replace_extension(".png");
-
-                if (std::filesystem::exists(pngPath, ec)) {
-                    info.textureID = SKSEMenuFramework::LoadTexture(pngPath.string());
-                }
-                else {
-                    info.textureID = nullptr;
-                }
-
-                scannedFaces.push_back(info);
-                manager->IndexFaceGenNif(info.nifPath, info.originFormID);
-
+        try {
+            if (it->is_regular_file() && IsNifPath(it->path())) {
+                files.push_back(BuildFaceGenFileInfo(it->path()));
             }
-            // CATCH ESPEC�FICO PARA O ERRO DE UNICODE DO WINDOWS
-            catch (const std::system_error& se) {
-                logger::error("[ScanFaceGeom] Filesystem/Unicode encoding error reading a file. Skipping it. Info: {}", se.what());
-            }
-            catch (const std::exception& e) {
-                logger::error("[ScanFaceGeom] Standard Exception processing file: {}", e.what());
-            }
-            catch (...) {
-                logger::error("[ScanFaceGeom] Unknown critical exception processing a FaceGeom file.");
-            }
+        }
+        catch (const std::system_error& se) {
+            logger::error("[ScanFaceGeom] Filesystem/Unicode encoding error reading a file. Skipping it. Info: {}", se.what());
+        }
+        catch (const std::exception& e) {
+            logger::error("[ScanFaceGeom] Standard Exception processing file: {}", e.what());
+        }
+        catch (...) {
+            logger::error("[ScanFaceGeom] Unknown critical exception processing a FaceGeom file.");
         }
     }
 
+    const auto recordResolvedFiles = AppendFaceGenFilesFromNPCRecords(geomPath, files);
+    logger::debug(
+        "[ScanFaceGeom] NPC record path pass added {} FaceGen files missed by directory enumeration.",
+        recordResolvedFiles);
+
+    std::sort(files.begin(), files.end(), [](const auto& lhs, const auto& rhs) {
+        return NormalizeGamePath(lhs.nifPath) < NormalizeGamePath(rhs.nifPath);
+    });
+    return files;
+}
+
+static void PopulateScannedFacesFromFiles(const std::vector<FaceGenNifFileInfo>& files)
+{
+    scannedFaces.clear();
+    scannedFaces.reserve(files.size());
+
+    std::error_code ec;
+    for (const auto& file : files) {
+        CustomFaceInfo info;
+        info.nifPath = file.nifPath;
+        info.displayPath = file.displayPath;
+        info.displayName = file.displayName;
+        info.originFormID = file.originFormID;
+
+        auto pngPath = file.fullPath;
+        pngPath.replace_extension(".png");
+        if (std::filesystem::exists(pngPath, ec)) {
+            info.textureID = SKSEMenuFramework::LoadTexture(pngPath.string());
+        }
+        else {
+            info.textureID = nullptr;
+        }
+        ec.clear();
+
+        scannedFaces.push_back(std::move(info));
+    }
+}
+
+static bool ApplyEditorDataToCurrentTESNPCForFaceGenTest()
+{
+    if (!g_currentNPC) {
+        logger::warn("[FaceGen TESNPC Test] Aborted: no NPC is loaded in the Editor.");
+        return false;
+    }
+
+    rapidjson::Document doc;
+    GenerateJSONFromUI(doc);
+    logger::debug("[FaceGen TESNPC Test] Applying current Editor document to npc={:08X} members={} headParts={} customFaceNif='{}'.",
+        g_currentNPC->GetFormID(),
+        doc.MemberCount(),
+        ui_headParts.size(),
+        ui_customFaceNif);
+    Manager::ApplyNPCCustomizationFromJSON(g_currentNPC, doc);
+    logger::debug("[FaceGen TESNPC Test] Applied npc={:08X} race={:X} headParts={} faceData={:X}.",
+        g_currentNPC->GetFormID(),
+        reinterpret_cast<std::uintptr_t>(g_currentNPC->race),
+        static_cast<unsigned>(g_currentNPC->numHeadParts),
+        reinterpret_cast<std::uintptr_t>(g_currentNPC->faceData));
+    return true;
+}
+
+static bool FaceGenCacheMatchesFiles(const rapidjson::Document& doc, const std::vector<FaceGenNifFileInfo>& files)
+{
+    if (!doc.IsObject() || !doc.HasMember("version") || !doc["version"].IsUint() || doc["version"].GetUint() != 1) {
+        return false;
+    }
+    if (!doc.HasMember("files") || !doc["files"].IsArray()) {
+        return false;
+    }
+
+    const auto& cachedFiles = doc["files"].GetArray();
+    if (cachedFiles.Size() != files.size()) {
+        return false;
+    }
+
+    std::map<std::string, std::pair<std::uintmax_t, std::int64_t>> manifest;
+    for (const auto& item : cachedFiles) {
+        if (!item.IsObject() || !item.HasMember("nifPath") || !item["nifPath"].IsString() ||
+            !item.HasMember("size") || !item["size"].IsUint64() ||
+            !item.HasMember("writeTime") || !item["writeTime"].IsInt64()) {
+            return false;
+        }
+
+        manifest[NormalizeGamePath(item["nifPath"].GetString())] = {
+            static_cast<std::uintmax_t>(item["size"].GetUint64()),
+            item["writeTime"].GetInt64()
+        };
+    }
+
+    for (const auto& file : files) {
+        const auto it = manifest.find(NormalizeGamePath(file.nifPath));
+        if (it == manifest.end() || it->second.first != file.fileSize || it->second.second != file.writeTime) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool LoadFaceGenGeometryCache(const std::vector<FaceGenNifFileInfo>& files, Manager* manager)
+{
+    FILE* fp = nullptr;
+    fopen_s(&fp, FaceGenCachePath, "rb");
+    if (!fp) {
+        return false;
+    }
+
+    char readBuffer[65536];
+    rapidjson::FileReadStream is(fp, readBuffer, sizeof(readBuffer));
+    rapidjson::Document doc;
+    doc.ParseStream(is);
+    fclose(fp);
+
+    if (!FaceGenCacheMatchesFiles(doc, files)) {
+        return false;
+    }
+    if (!doc.HasMember("geometries") || !doc["geometries"].IsArray()) {
+        return false;
+    }
+
+    manager->ClearFaceGenGeometryIndex();
+    for (const auto& item : doc["geometries"].GetArray()) {
+        if (!item.IsObject() ||
+            !item.HasMember("nifPath") || !item["nifPath"].IsString() ||
+            !item.HasMember("geometryName") || !item["geometryName"].IsString()) {
+            continue;
+        }
+
+        FaceGenGeometrySource source;
+        source.nifPath = item["nifPath"].GetString();
+        source.geometryName = item["geometryName"].GetString();
+        if (item.HasMember("originFormID") && item["originFormID"].IsUint()) {
+            source.originFormID = item["originFormID"].GetUint();
+        }
+        if (item.HasMember("kind") && item["kind"].IsString()) {
+            source.kind = item["kind"].GetString();
+        }
+        manager->AddIndexedFaceGenGeometry(source);
+    }
+
+    logger::debug("[FaceGen Cache] Loaded cache '{}'. Baked geometries indexed: {}. Duplicates ignored: {}.",
+        FaceGenCachePath,
+        manager->GetFaceGenGeometryIndexSize(),
+        manager->GetFaceGenGeometryDuplicateCount());
+    return true;
+}
+
+static void SaveFaceGenGeometryCache(const std::vector<FaceGenNifFileInfo>& files, Manager* manager)
+{
+    EnsureStorageDirectories();
+
+    rapidjson::Document doc;
+    doc.SetObject();
+    auto& allocator = doc.GetAllocator();
+
+    doc.AddMember("version", 1, allocator);
+
+    rapidjson::Value fileArray(rapidjson::kArrayType);
+    for (const auto& file : files) {
+        rapidjson::Value item(rapidjson::kObjectType);
+        item.AddMember("nifPath", rapidjson::Value(file.nifPath.c_str(), allocator), allocator);
+        item.AddMember("size", static_cast<std::uint64_t>(file.fileSize), allocator);
+        item.AddMember("writeTime", file.writeTime, allocator);
+        fileArray.PushBack(item, allocator);
+    }
+    doc.AddMember("files", fileArray, allocator);
+
+    rapidjson::Value geometryArray(rapidjson::kArrayType);
+    for (const auto& source : manager->GetFaceGenGeometryIndexEntries()) {
+        rapidjson::Value item(rapidjson::kObjectType);
+        item.AddMember("nifPath", rapidjson::Value(source.nifPath.c_str(), allocator), allocator);
+        item.AddMember("geometryName", rapidjson::Value(source.geometryName.c_str(), allocator), allocator);
+        item.AddMember("originFormID", source.originFormID, allocator);
+        item.AddMember("kind", rapidjson::Value(source.kind.c_str(), allocator), allocator);
+        geometryArray.PushBack(item, allocator);
+    }
+    doc.AddMember("geometries", geometryArray, allocator);
+
+    FILE* fp = nullptr;
+    fopen_s(&fp, FaceGenCachePath, "wb");
+    if (!fp) {
+        logger::warn("[FaceGen Cache] Failed to write '{}'.", FaceGenCachePath);
+        return;
+    }
+
+    char writeBuffer[65536];
+    rapidjson::FileWriteStream os(fp, writeBuffer, sizeof(writeBuffer));
+    rapidjson::PrettyWriter<rapidjson::FileWriteStream> writer(os);
+    doc.Accept(writer);
+    fclose(fp);
+
+    logger::debug("[FaceGen Cache] Saved cache '{}'. Files: {}. Baked geometries: {}.",
+        FaceGenCachePath,
+        files.size(),
+        manager->GetFaceGenGeometryIndexSize());
+}
+
+void ScanFaceGeom(bool forceRebuildCache) {
+    auto* manager = Manager::GetSingleton();
+    const auto files = CollectFaceGenNifFiles();
+    PopulateScannedFacesFromFiles(files);
+
+    if (files.empty()) {
+        manager->ClearFaceGenGeometryIndex();
+        needFaceScan = false;
+        return;
+    }
+
+    if (!forceRebuildCache && LoadFaceGenGeometryCache(files, manager)) {
+        logger::debug("[ScanFaceGeom] Scan completed from cache. Faces found: {}. Baked geometries indexed: {}. Duplicates ignored: {}.",
+            scannedFaces.size(),
+            manager->GetFaceGenGeometryIndexSize(),
+            manager->GetFaceGenGeometryDuplicateCount());
+        needFaceScan = false;
+        return;
+    }
+
+    logger::debug("[ScanFaceGeom] Rebuilding FaceGen cache. Force rebuild: {}. NIF files: {}.", forceRebuildCache, files.size());
+    manager->ClearFaceGenGeometryIndex();
+    for (const auto& file : files) {
+        logger::debug("[ScanFaceGeom] Indexing NIF: {}", file.nifPath);
+        manager->IndexFaceGenNif(file.nifPath, file.originFormID);
+    }
+
+    SaveFaceGenGeometryCache(files, manager);
     logger::debug("[ScanFaceGeom] Scan completed. Faces found: {}. Baked geometries indexed: {}. Duplicates ignored: {}.",
         scannedFaces.size(),
         manager->GetFaceGenGeometryIndexSize(),
@@ -3020,7 +3282,9 @@ void NSettings::NPCList() {
 
     if (npcList.empty()) {
         ImGuiMCP::Text("No NPCs loaded into memory. Force a scan.");
-        if (ImGuiMCP::Button("Force Scan")) manager->PopulateAllLists(true);
+        if (ImGuiMCP::Button("Force Scan")) {
+            logger::debug("[NPCList] Force Scan clicked; list population is handled by DataLoaded/DFG callbacks.");
+        }
         return;
     }
 
@@ -3266,14 +3530,64 @@ void NSettings::Debug()
 
     if (ImGuiMCP::Button(GetLoc("debug.reload_data", "Reload Data"))) {
         if (manager) {
-            logger::debug("[DebugMenu] Reload Data clicked: forcing PopulateAllLists after dynamic form update.");
-            manager->_isPopulated = false;
-            logger::debug("[DebugMenu] PopulateAllLists BEGIN reason=manual_reload_data");
-            manager->PopulateAllLists(true);
-            logger::debug("[DebugMenu] PopulateAllLists END reason=manual_reload_data");
+            logger::debug("[DebugMenu] Reload Data clicked; list population is handled by DataLoaded/DFG callbacks.");
         }
         else {
             logger::debug("[DebugMenu] Reload Data clicked but manager is null.");
+        }
+    }
+
+    ImGuiMCP::Separator();
+    ImGuiMCP::Text(GetLoc("debug.facegen_cache_status", "FaceGen cache: %u faces, %u baked geometries, %u duplicate geometries ignored."),
+        static_cast<unsigned>(scannedFaces.size()),
+        manager ? static_cast<unsigned>(manager->GetFaceGenGeometryIndexSize()) : 0U,
+        manager ? static_cast<unsigned>(manager->GetFaceGenGeometryDuplicateCount()) : 0U);
+    ImGuiMCP::TextWrapped("%s", GetLoc("debug.rebuild_facegen_cache_hint", "Forces NPC Visual to reopen FaceGen NIFs and rebuild the baked geometry cache."));
+    if (ImGuiMCP::Button(GetLoc("debug.rebuild_facegen_cache", "Rebuild FaceGen Cache"))) {
+        logger::debug("[DebugMenu] Rebuild FaceGen Cache clicked.");
+        ScanFaceGeom(true);
+    }
+
+    constexpr bool showExperimentalFaceGenTools = false;
+    if (showExperimentalFaceGenTools) {
+        ImGuiMCP::Separator();
+        if (!g_currentActor || !g_currentNPC || !ui_race) {
+            ImGuiMCP::TextWrapped("%s", GetLoc("debug.test_build_facegen_no_npc", "Load an actor in the Editor tab before building and installing FaceGen."));
+        }
+        ImGuiMCP::TextWrapped("%s", GetLoc("debug.apply_editor_to_tesnpc_hint", "Applies the current Editor values directly to the TESNPC base form without resetting or modifying the actor's loaded 3D."));
+        if (ImGuiMCP::Button(GetLoc("debug.apply_editor_to_tesnpc", "Apply Editor Data to TESNPC"))) {
+            logger::debug("[DebugMenu] Apply Editor Data to TESNPC clicked npc={:X}.",
+                reinterpret_cast<std::uintptr_t>(g_currentNPC));
+            ApplyEditorDataToCurrentTESNPCForFaceGenTest();
+        }
+
+        ImGuiMCP::TextWrapped("%s", GetLoc("debug.test_build_facegen_hint", "Experimental: applies the current Editor values to the TESNPC, builds one FaceGen node, installs it as the actor's official face, then applies the selected FaceGeom NIF deformation when available."));
+        if (ImGuiMCP::Button(GetLoc("debug.test_build_facegen", "Build and Install FaceGen on Actor"))) {
+            logger::debug("[DebugMenu] Build and Install FaceGen clicked actor={:X} npc={:X} race={:X} nif='{}'.",
+                reinterpret_cast<std::uintptr_t>(g_currentActor),
+                reinterpret_cast<std::uintptr_t>(g_currentNPC),
+                reinterpret_cast<std::uintptr_t>(ui_race),
+                ui_customFaceNif);
+            if (g_currentActor && g_currentNPC && ui_race && ApplyEditorDataToCurrentTESNPCForFaceGenTest()) {
+                const auto actorID = g_currentActor->GetFormID();
+                const auto npcID = g_currentNPC->GetFormID();
+                const std::string nifPath = ui_customFaceNif;
+                if (auto* taskInterface = SKSE::GetTaskInterface()) {
+                    taskInterface->AddTask([actorID, npcID, nifPath]() {
+                        auto* actor = RE::TESForm::LookupByID<RE::Actor>(actorID);
+                        auto* npc = RE::TESForm::LookupByID<RE::TESNPC>(npcID);
+                        auto* race = npc ? npc->race : nullptr;
+                        if (Manager::DebugBuildFaceGenForNPC(actor, race, npc) && !nifPath.empty()) {
+                            logger::debug("[DebugMenu] Generated face installed; scheduling NIF deformation actor={:08X} nif='{}'.",
+                                actorID,
+                                nifPath);
+                            Manager::ScheduleFaceDeform(actorID, nifPath);
+                        }
+                    });
+                } else {
+                    logger::error("[DebugMenu] Build and Install FaceGen aborted: SKSE TaskInterface unavailable.");
+                }
+            }
         }
     }
 }
