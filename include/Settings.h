@@ -19,6 +19,7 @@ namespace NSettings {
     void NPCList();
     void Export();
     void MmRegister();
+    void InitializeFaceGenCache();
     void Load();
     void Save();
 	void Debug();

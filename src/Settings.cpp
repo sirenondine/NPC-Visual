@@ -1,6 +1,8 @@
 ﻿#include "Settings.h"
 #include "Manager.h"
 
+#include <chrono>
+
 const char* BasePath = "Data/Viny Mods/NPC Visual";
 const char* NPCPath = "Data/Viny Mods/NPC Visual/NPC";
 const char* PresetsPath = "Data/Viny Mods/NPC Visual/Presets";
@@ -3795,10 +3797,24 @@ void NSettings::Load() {
         }
     }
 
-    logger::debug("[LoadSavedData] ScanFaceGeom BEGIN");
-    ScanFaceGeom();
-    logger::debug("[LoadSavedData] ScanFaceGeom END");
-
     logger::debug("[LoadSavedData] END presets={} npcs={}", countPresetsCarregados, countNPCsModificados);
     logger::info("[NPC Replacer] BOOT CONCLUIDO: {} presets em cache, {} NPCs modificados com sucesso.", countPresetsCarregados, countNPCsModificados);
+}
+
+void NSettings::InitializeFaceGenCache()
+{
+    static bool initialized = false;
+    if (initialized) {
+        logger::debug("[FaceGenCache] Initialization skipped: already initialized for this game process.");
+        return;
+    }
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    logger::info("[FaceGenCache] Initializing FaceGen index.");
+    ScanFaceGeom();
+    initialized = true;
+
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt).count();
+    logger::info("[FaceGenCache] Initialization completed in {} ms.", elapsedMs);
 }
