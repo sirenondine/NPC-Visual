@@ -972,7 +972,7 @@ namespace {
         std::unordered_set<std::uint16_t> slots;
         for (std::int32_t i = 0; i < runtime.numPartitions; ++i) {
             auto& partition = runtime.partitions[i];
-            partition.editorVisible = true;
+            partition.visible = true;
             slots.insert(partition.slot);
         }
 
@@ -1557,7 +1557,7 @@ namespace {
                 targetDynShape->RemoveExtraData("FOD");
             }
 
-            auto* newFod = RE::BSFaceGenBaseMorphExtraData::Create(nullptr, false);
+            auto* newFod = RE::FODUtil::Create(nullptr, false);
             if (newFod) {
                 newFod->vertexCount = targetVertCount;
                 newFod->modelVertexCount = targetVertCount;
@@ -1956,7 +1956,7 @@ namespace {
                     a_prefix,
                     i,
                     runtime.partitions[i].slot,
-                    runtime.partitions[i].editorVisible);
+                    runtime.partitions[i].visible);
             }
         }
     }
