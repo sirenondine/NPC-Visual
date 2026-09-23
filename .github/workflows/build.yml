@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+  COMMONLIB_SSE_FOLDER: ${{ github.workspace }}/CommonLibSSE-NG
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
+  # CMake 4 refuses projects whose cmake_minimum_required is < 3.5 (some vcpkg
+  # ports and CommonLib helpers still are); this keeps the old policies alive.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout CommonLibSSE-NG
+        uses: actions/checkout@v4
+        with:
+          repository: alandtse/CommonLibVR
+          ref: ng
+          path: CommonLibSSE-NG
+          submodules: recursive
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+          fetch-depth: 0
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          & "$env:VCPKG_ROOT/bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/*.cmake') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/release --config Release
+
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/SKSE/Plugins | Out-Null
+          Copy-Item build/release/*.dll dist/SKSE/Plugins/
+          if (Test-Path build/release/*.pdb) { Copy-Item build/release/*.pdb dist/SKSE/Plugins/ }
+          if (Test-Path Data) { Copy-Item -Recurse Data/* dist/ }
+          Get-ChildItem -Recurse dist | Select-Object FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NPCReplacer-${{ github.sha }}
+          path: dist
