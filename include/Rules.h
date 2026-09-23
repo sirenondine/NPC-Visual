@@ -21,6 +21,9 @@
 //       "headPrefix": "00BoP_",
 //       "headVariants": [],                 // optional
 //       "headPlugin": "",                   // optional: only heads from this plugin
+//       "headSourcePlugins": ["Skyrim.esm"],// only swap a head that currently comes from
+//                                           // these plugins (default: the vanilla masters);
+//                                           // "*" = any. Keeps followers' custom heads.
 //       "partPrefixes": ["CVEO_", "00_"],   // preference order
 //       "raceAliases": { "snowelf": "highelfsnow" },   // optional, merged over the defaults
 //       "plugins": [], "excludePlugins": [],           // NPC's defining plugin

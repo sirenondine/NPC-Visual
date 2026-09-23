@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -66,8 +67,16 @@ namespace {
         std::vector<std::string> partPrefixes;
         std::map<std::string, std::string> raceAliases;
         std::vector<std::string> plugins, excludePlugins, races, excludeRaces, editorIdPrefixes, excludeEditorIdPrefixes;
+        // Only swap a head that currently comes from one of these plugins.
+        // Protects followers / replacers that ship their own head part and a
+        // sculpted FaceGen NVE cannot rebuild. "*" = any plugin.
+        std::vector<std::string> headSourcePlugins;
 
         bool SwapsHeads() const { return !headPrefix.empty() || !headPlugin.empty(); }
+        bool HeadSourceAllowed(std::string_view a_plugin) const
+        {
+            return ListHas(headSourcePlugins, "*") || ListHas(headSourcePlugins, a_plugin);
+        }
     };
 
     // Every HDPT in the load order, keyed by lower-cased EditorID. Built once per Apply().
@@ -274,6 +283,10 @@ namespace {
                 rule.excludeRaces = ReadStringArray(r, "excludeRaces");
                 rule.editorIdPrefixes = ReadStringArray(r, "editorIdPrefixes");
                 rule.excludeEditorIdPrefixes = ReadStringArray(r, "excludeEditorIdPrefixes");
+                rule.headSourcePlugins = ReadStringArray(r, "headSourcePlugins");
+                if (rule.headSourcePlugins.empty()) {
+                    rule.headSourcePlugins = { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" };
+                }
 
                 if (!rule.SwapsHeads() && rule.partPrefixes.empty()) {
                     logger::warn("[Rules] rule '{}' in {} does nothing (no headPrefix/headPlugin and no partPrefixes), ignored", rule.name, path.filename().string());
@@ -304,7 +317,9 @@ int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
     const HeadPartIndex index;
     logger::info("[Rules] {} rule(s), {} head parts indexed", rules.size(), index.Size());
 
-    int changedNPCs = 0, headSwaps = 0, partSwaps = 0, skippedJson = 0, skippedTemplate = 0, noHead = 0;
+    int changedNPCs = 0, headSwaps = 0, partSwaps = 0, skippedJson = 0, skippedTemplate = 0, noHead = 0, keptCustomHead = 0;
+    std::map<std::string, int> noHeadByRace;      // "NordRaceVampire (F)" -> count
+    std::map<std::string, int> customHeadByPlugin; // defining plugin of the head we left alone -> count
 
     for (auto* npc : handler->GetFormArray<RE::TESNPC>()) {
         if (!npc || npc->IsDeleted()) continue;
@@ -345,11 +360,16 @@ int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
             // The head for this race and sex
             if (rule.SwapsHeads()) {
                 auto* target = SwapTargetHead(npc, race, rule, index);
+                auto it = std::find_if(parts.begin(), parts.end(), [](auto* hp) { return hp && hp->type.get() == RE::BGSHeadPart::HeadPartType::kFace; });
                 if (!target) {
                     ++noHead;
+                    ++noHeadByRace[EditorIDOf(race) + (npc->IsFemale() ? " (F)" : " (M)")];
                     logger::debug("[Rules] {} [{:08X}]: no head for {} in rule '{}'", EditorIDOf(npc), npc->GetFormID(), RaceToken(race, rule), rule.name);
+                } else if (it != parts.end() && *it != target && !rule.HeadSourceAllowed(PluginOf(*it))) {
+                    ++keptCustomHead;
+                    ++customHeadByPlugin[PluginOf(*it)];
+                    logger::debug("[Rules] {} [{:08X}]: head {} from {} kept (not in headSourcePlugins)", EditorIDOf(npc), npc->GetFormID(), EditorIDOf(*it), PluginOf(*it));
                 } else {
-                    auto it = std::find_if(parts.begin(), parts.end(), [](auto* hp) { return hp && hp->type.get() == RE::BGSHeadPart::HeadPartType::kFace; });
                     if (it == parts.end()) {
                         parts.push_back(target);
                         ++headSwaps;
@@ -379,7 +399,26 @@ int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
         ++changedNPCs;
     }
 
-    logger::info("[Rules] applied: {} NPCs changed, {} head swaps, {} part swaps; skipped {} with JSON, {} templated; {} without a head for their race/sex",
-        changedNPCs, headSwaps, partSwaps, skippedJson, skippedTemplate, noHead);
+    logger::info("[Rules] applied: {} NPCs changed, {} head swaps, {} part swaps; skipped {} with JSON, {} templated; {} kept a custom head; {} without a head for their race/sex",
+        changedNPCs, headSwaps, partSwaps, skippedJson, skippedTemplate, keptCustomHead, noHead);
+
+    auto logTally = [](const char* a_label, const std::map<std::string, int>& a_tally) {
+        if (a_tally.empty()) return;
+        std::vector<std::pair<std::string, int>> rows(a_tally.begin(), a_tally.end());
+        std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string line;
+        std::size_t shown = 0;
+        for (const auto& [key, count] : rows) {
+            if (shown++ == 30) {
+                line += std::format(", ... {} more", rows.size() - 30);
+                break;
+            }
+            if (!line.empty()) line += ", ";
+            line += std::format("{} {}", key, count);
+        }
+        logger::info("[Rules] {}: {}", a_label, line);
+    };
+    logTally("no head by race", noHeadByRace);
+    logTally("custom heads kept by plugin", customHeadByPlugin);
     return changedNPCs;
 }
