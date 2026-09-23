@@ -1,0 +1,24 @@
+{
+  "rules": [
+    {
+      "name": "IMMORTAN heads and parts",
+      "headPrefix": "00BoP_",
+      "partPrefixes": ["CVEO_", "00_"],
+      "excludeRaces": ["ArgonianRace", "ArgonianRaceVampire", "KhajiitRace", "KhajiitRaceVampire"]
+    },
+    {
+      "name": "IMMORTAN Beasts - Argonian",
+      "headPrefix": "00_",
+      "partPrefixes": ["CVEO_", "00_"],
+      "races": ["ArgonianRace"]
+    },
+    {
+      "name": "IMMORTAN Beasts - Khajiit",
+      "headPrefix": "",
+      "headPlugin": "immortan - beasts.esp",
+      "headVariants": ["tiger", "cheetah", "smilodon", "leopard", "lioness"],
+      "partPrefixes": ["CVEO_", "00_"],
+      "races": ["KhajiitRace"]
+    }
+  ]
+}

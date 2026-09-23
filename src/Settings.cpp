@@ -1,7 +1,9 @@
 ﻿#include "Settings.h"
 #include "Manager.h"
+#include "Rules.h"
 
 #include <chrono>
+#include <set>
 
 const char* BasePath = "Data/Viny Mods/NPC Visual";
 const char* NPCPath = "Data/Viny Mods/NPC Visual/NPC";
@@ -612,6 +614,15 @@ static rapidjson::Document BuildSafeCustomizationDocument(RE::TESNPC* npc, const
 
     OverlayJsonObject(safeDoc, loadedDoc);
     return safeDoc;
+}
+
+// Rules layer entry point: apply a partial visual document (e.g. just
+// "headParts") the same way a per-NPC JSON is applied, minus the face NIF.
+void NSettings::ApplyDocumentToNPC(RE::TESNPC* npc, const rapidjson::Document& doc)
+{
+    if (!npc) return;
+    rapidjson::Document safeDoc = BuildSafeCustomizationDocument(npc, doc);
+    Manager::ApplyNPCCustomizationFromJSON(npc, safeDoc);
 }
 
 // ==========================================
@@ -3642,6 +3653,7 @@ void NSettings::Load() {
     int countNPCsModificados = 0;
 
     std::map<std::string, rapidjson::Document> presetCache;
+    std::set<RE::FormID> npcsWithJson;
 
     const auto presetFiles = CollectJsonFiles(PresetsPath, LegacyPresetsPath);
     const auto npcFiles = CollectJsonFiles(NPCPath, LegacyNPCPath);
@@ -3765,6 +3777,7 @@ void NSettings::Load() {
                     logger::debug("[LoadSavedData] Preset sem customFaceNif; NPC {:08X} nao registrado como affected face.", targetNPC->GetFormID());
                 }
                 countNPCsModificados++;
+                npcsWithJson.insert(targetNPC->GetFormID());
             }
             else {
                 logger::error("[LoadSavedData] ABORTANDO: NPC {} aponta para preset '{}' que NAO FOI ENCONTRADO no cache.", filename, presetName);
@@ -3794,11 +3807,15 @@ void NSettings::Load() {
                 logger::debug("[LoadSavedData] JSON sem customFaceNif; NPC {:08X} nao registrado como affected face.", targetNPC->GetFormID());
             }
             countNPCsModificados++;
+            npcsWithJson.insert(targetNPC->GetFormID());
         }
     }
 
+    logger::debug("[LoadSavedData] Passo 3: Regras de runtime...");
+    const int countNPCsPorRegras = NRules::Apply(npcsWithJson);
+
     logger::debug("[LoadSavedData] END presets={} npcs={}", countPresetsCarregados, countNPCsModificados);
-    logger::info("[NPC Replacer] BOOT CONCLUIDO: {} presets em cache, {} NPCs modificados com sucesso.", countPresetsCarregados, countNPCsModificados);
+    logger::info("[NPC Replacer] BOOT CONCLUIDO: {} presets em cache, {} NPCs modificados com sucesso, {} NPCs por regras.", countPresetsCarregados, countNPCsModificados, countNPCsPorRegras);
 }
 
 void NSettings::InitializeFaceGenCache()

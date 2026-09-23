@@ -22,5 +22,6 @@ namespace NSettings {
     void InitializeFaceGenCache();
     void Load();
     void Save();
+    void ApplyDocumentToNPC(RE::TESNPC* npc, const rapidjson::Document& doc);
 	void Debug();
 }
