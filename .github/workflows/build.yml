@@ -16,7 +16,8 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # windows-2022 = VS 2022 / MSVC 14.4x, the toolchain the SKSE ecosystem targets.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
@@ -52,9 +53,14 @@ jobs:
         with:
           arch: x64
 
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
       - name: Configure
         shell: pwsh
-        run: cmake --preset release
+        # msvc-dev-cmd points VCPKG_ROOT at Visual Studio's bundled vcpkg; use ours.
+        run: |
+          $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
+          cmake --preset release
 
       - name: Build
         shell: pwsh
