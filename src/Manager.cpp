@@ -607,6 +607,20 @@ void Manager::ApplyNPCCustomizationFromJSON(RE::TESNPC* npc, const rapidjson::Do
                 std::min<std::size_t>(mArray.Size(), 19));
         }
 
+        // 5b. Face presets (NAMA: nose, unknown, eyes, mouth) — the CK's preset
+        // pickers; without these a stripped record falls back to vanilla presets.
+        if (doc.HasMember("facePresets") && doc["facePresets"].IsArray()) {
+            if (!npc->faceData) {
+                npc->faceData = new RE::TESNPC::FaceData();
+            }
+            auto pArray = doc["facePresets"].GetArray();
+            for (rapidjson::SizeType i = 0; i < pArray.Size() && i < RE::TESNPC::FaceData::Parts::kTotal; i++) {
+                if (pArray[i].IsInt()) npc->faceData->parts[i] = pArray[i].GetInt();
+            }
+            logger::debug("[ApplyJSON] [{:08X}] Passo 5b OK: presets nose={} unk={} eyes={} mouth={}",
+                npc->GetFormID(), npc->faceData->parts[0], npc->faceData->parts[1], npc->faceData->parts[2], npc->faceData->parts[3]);
+        }
+
         logger::debug("[ApplyJSON] === END OK NPC {:08X}: headPartsPtr={:X} count={} tintLayers={:X} faceData={:X} ===",
             npc->GetFormID(),
             reinterpret_cast<std::uintptr_t>(npc->headParts),

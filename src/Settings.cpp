@@ -467,6 +467,8 @@ static bool ui_oppositeGenderAnim = false;
 
 // Morphs (NAM9 tem 19 valores)
 static float ui_morphs[19] = { 0.0f };
+static int ui_presets[4] = { 0, 0, 0, 0 };   // NAMA: nose, unknown, eyes, mouth
+static bool ui_hasPresets = false;
 static const char* morphNames[18] = {
     "Nose: Long/Short", "Nose: Up/Down", "Jaw: Up/Down", "Jaw: Narrow/Wide", "Jaw: Forward/Back",
     "Cheeks: Up/Down", "Cheeks: Forward/Back", "Eyes: Up/Down", "Eyes: In/Out", "Brows: Up/Down",
@@ -578,6 +580,12 @@ void CaptureVanillaState(RE::TESNPC* npc, std::string& outJson) {
         for (int i = 0; i < 19; i++) morphsArray.PushBack(npc->faceData->morphs[i], allocator);
     }
     doc.AddMember("faceMorphs", morphsArray, allocator);
+
+    rapidjson::Value presetsArray(rapidjson::kArrayType);
+    if (npc->faceData) {
+        for (int i = 0; i < RE::TESNPC::FaceData::Parts::kTotal; i++) presetsArray.PushBack(npc->faceData->parts[i], allocator);
+    }
+    doc.AddMember("facePresets", presetsArray, allocator);
 
     rapidjson::StringBuffer buffer;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
@@ -1115,6 +1123,11 @@ void GenerateJSONFromUI(rapidjson::Document& doc) {
         for (int i = 0; i < 19; i++) morphsArray.PushBack(ui_morphs[i], allocator);
         doc.AddMember("faceMorphs", morphsArray, allocator);
     }
+    if (ui_hasPresets) {
+        rapidjson::Value presetsArray(rapidjson::kArrayType);
+        for (int i = 0; i < 4; i++) presetsArray.PushBack(ui_presets[i], allocator);
+        doc.AddMember("facePresets", presetsArray, allocator);
+    }
 }
 
 void UpdateLastSavedState() {
@@ -1220,6 +1233,14 @@ void ParseJSONToUI(const rapidjson::Document& j) {
             tl.preset = static_cast<uint16_t>(getInt(l, "preset", 0));
             ui_tintLayers.push_back(tl);
         }
+    }
+
+    if (j.HasMember("facePresets") && j["facePresets"].IsArray()) {
+        const auto pArray = j["facePresets"].GetArray();
+        for (rapidjson::SizeType i = 0; i < pArray.Size() && i < 4; i++) {
+            if (pArray[i].IsInt()) ui_presets[i] = pArray[i].GetInt();
+        }
+        ui_hasPresets = true;
     }
 
     if (j.HasMember("faceMorphs") && j["faceMorphs"].IsArray()) {
@@ -1471,6 +1492,8 @@ void LoadNPCToUI(RE::TESNPC* npcToLoad = nullptr, RE::Actor* actorRef = nullptr)
         }
     }
 
+    ui_hasPresets = g_currentNPC->faceData != nullptr;
+    for (int i = 0; i < 4; i++) ui_presets[i] = g_currentNPC->faceData ? g_currentNPC->faceData->parts[i] : 0;
     if (g_currentNPC->faceData) {
         for (int i = 0; i < 19; i++) ui_morphs[i] = g_currentNPC->faceData->morphs[i];
     }
