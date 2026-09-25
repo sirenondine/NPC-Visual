@@ -333,6 +333,15 @@ void Manager::ApplyNPCCustomizationFromJSON(RE::TESNPC* npc, const rapidjson::Do
         logger::error("[ApplyJSON] Falha: JSON invalido para NPC {:08X}; documento nao eh objeto.", npc->GetFormID());
         return;
     }
+    // Traits come from the template NPC; the template gets its own pass. Editing a
+    // template consumer has no visible effect and its buffers alias the template's,
+    // which is how the engine ends up double-freeing them. Same guard as Rules.cpp.
+    if (npc->baseTemplateForm && npc->actorData.templateUseFlags.any(RE::ACTOR_BASE_DATA::TEMPLATE_USE_FLAG::kTraits)) {
+        logger::debug("[ApplyJSON] [{:08X}] Ignorado: traits herdadas de template {:08X}.",
+            npc->GetFormID(),
+            npc->baseTemplateForm->GetFormID());
+        return;
+    }
 
     NPCVisualChangeGuard updateGuard(npc);
     std::string npcName = npc->GetFullName() ? npc->GetFullName() : "Unnamed";
@@ -535,12 +544,27 @@ void Manager::ApplyNPCCustomizationFromJSON(RE::TESNPC* npc, const rapidjson::Do
             }
 
             if (npc->headParts) {
-                logger::debug("[ApplyJSON] [{:08X}] Liberando memoria das HeadParts originais...", npc->GetFormID());
-                RE::free(npc->headParts);
+                // Deliberately not freed. A templated NPC shallow-copies this pointer from its
+                // base, so the old array can still be reachable from dynamic (0xFF......) NPCs the
+                // engine spawned for leveled actors. Freeing it here made the engine free it a
+                // second time in Character::LoadGame, corrupting the heap.
+                logger::debug("[ApplyJSON] [{:08X}] Abandonando HeadParts originais (ptr={:X}) sem liberar: podem estar compartilhadas com NPCs dinamicos.",
+                    npc->GetFormID(),
+                    reinterpret_cast<std::uintptr_t>(npc->headParts));
                 npc->headParts = nullptr;
             }
 
             if (!parts.empty()) {
+                // numHeadParts is int8_t, so the engine cannot address more than 127 entries.
+                constexpr size_t kMaxHeadParts = 127;
+                if (parts.size() > kMaxHeadParts) {
+                    logger::warn("[ApplyJSON] [{:08X}] {} HeadParts excedem o limite de {}; truncando.",
+                        npc->GetFormID(),
+                        parts.size(),
+                        kMaxHeadParts);
+                    parts.resize(kMaxHeadParts);
+                }
+
                 logger::debug("[ApplyJSON] [{:08X}] Alocando {} novas HeadParts...", npc->GetFormID(), parts.size());
                 auto newHeadParts = RE::calloc<RE::BGSHeadPart*>(parts.size());
                 if (!newHeadParts) {
