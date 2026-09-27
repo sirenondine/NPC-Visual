@@ -66,6 +66,7 @@ void OnMessage(SKSE::MessagingInterface::Message* message) {
         logger::debug("[MainMenuBoot] AllocTrampoline BEGIN");
         SKSE::AllocTrampoline(64);
         logger::debug("[MainMenuBoot] AllocTrampoline END");
+        FaceMorphLockFix::Install();
         logger::debug("[MainMenuBoot] MmRegister BEGIN");
         NSettings::MmRegister();
         logger::debug("[MainMenuBoot] MmRegister END");

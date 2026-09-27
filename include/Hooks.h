@@ -29,3 +29,12 @@ private:
     static inline REL::Relocation<decltype(&Hook_Load3D_Char)> _Load3D_Char;
     static inline REL::Relocation<decltype(&Hook_Load3D_Player)> _Load3D_Player;
 };
+
+// Vanilla face morph apply (AE 26917) locks the head part's BSDynamicTriShape,
+// then returns without unlocking when the TRI morph has more vertices than the
+// mesh (IMMORTAN new_mustache_base_01: 210 vs 247). The lock stays owned by an
+// idle job thread and the next face update on that NPC deadlocks the game.
+class FaceMorphLockFix {
+public:
+    static void Install();
+};

@@ -3,6 +3,10 @@
 #include "DelayedDispatcher.h"
 #include "BSFaceGenBaseMorphExtraData.h"
 
+#include <array>
+#include <cstdint>
+#include <cstring>
+
 
 // ==============================================================================
 // FUNÇÃO AUXILIAR PARA RASTREIO DE FMD
@@ -97,6 +101,59 @@ namespace TaskScheduler {
             });
     }
 
+}
+
+void FaceMorphLockFix::Install()
+{
+    if (REL::Module::GetRuntime() != REL::Module::Runtime::AE) {
+        logger::warn("[FaceMorphLockFix] Skipped: offsets are only known for AE.");
+        return;
+    }
+
+    constexpr std::uintptr_t kBranchOffset = 0x80;  // jb <exit> right after the vertex-count check
+    constexpr std::uintptr_t kExitOffset = 0x4A5;   // shared epilogue that skips the unlock
+    REL::Relocation<std::uintptr_t> func{ REL::VariantID(0, 26917, 0x0) };
+    REL::Relocation<std::uintptr_t> unlock{ REL::VariantID(0, 70952, 0x0) };
+
+    const auto branch = func.address() + kBranchOffset;
+    const auto exit = func.address() + kExitOffset;
+    const auto* code = reinterpret_cast<const std::uint8_t*>(branch);
+    std::int32_t rel = 0;
+    std::memcpy(&rel, code + 2, sizeof(rel));
+    if (code[0] != 0x0F || code[1] != 0x82 || branch + 6 + rel != exit) {
+        logger::warn("[FaceMorphLockFix] Unexpected code at {:X}; not patching.", branch);
+        return;
+    }
+
+    // mov rcx, [rsp+0xA8]   ; the locked geometry, spilled right after the lock
+    // call [rip+2]          ; unlock
+    // jmp +8
+    // dq unlock
+    // jmp [rip+0]
+    // dq exit
+    std::array<std::uint8_t, 38> stub{
+        0x48, 0x8B, 0x8C, 0x24, 0xA8, 0x00, 0x00, 0x00,
+        0xFF, 0x15, 0x02, 0x00, 0x00, 0x00,
+        0xEB, 0x08,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+        0, 0, 0, 0, 0, 0, 0, 0
+    };
+    const auto unlockAddr = unlock.address();
+    std::memcpy(stub.data() + 16, &unlockAddr, sizeof(unlockAddr));
+    std::memcpy(stub.data() + 30, &exit, sizeof(exit));
+
+    auto* mem = static_cast<std::uint8_t*>(SKSE::GetTrampoline().allocate(stub.size()));
+    std::memcpy(mem, stub.data(), stub.size());
+
+    const auto disp = static_cast<std::intptr_t>(reinterpret_cast<std::uintptr_t>(mem) - (branch + 6));
+    if (disp < INT32_MIN || disp > INT32_MAX) {
+        logger::error("[FaceMorphLockFix] Stub at {:X} out of rel32 range; not patching.", reinterpret_cast<std::uintptr_t>(mem));
+        return;
+    }
+    const auto newRel = static_cast<std::int32_t>(disp);
+    REL::safe_write(branch + 2, &newRel, sizeof(newRel));
+    logger::info("[FaceMorphLockFix] Installed at {:X} -> stub {:X}.", branch, reinterpret_cast<std::uintptr_t>(mem));
 }
 
 RE::NiAVObject* Load3DHook::Hook_Load3D_REFR(RE::TESObjectREFR* a_this, bool a_backgroundLoading) {
