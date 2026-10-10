@@ -1,0 +1,28 @@
+{
+  "rules": [
+    {
+      "name": "DollFace HPH scars (women)",
+      "sex": "female",
+      "partPrefixes": [
+        "00_"
+      ],
+      "partMap": {
+        "MarksFemaleHumanoid01LeftGash": "00aaSOBHighPolyFemaleGashWholeHead01HP",
+        "MarksFemaleHumanoid02LeftGash": "00aaSOBHighPolyFemaleGashWholeHead02HP",
+        "MarksFemaleHumanoid03LeftGash": "00aaSOBHighPolyFemaleGashWholeHead03HP",
+        "MarksFemaleHumanoid04LeftGash": "00aaSOBHighPolyFemaleGashWholeHead04HP",
+        "MarksFemaleHumanoid05LeftGash": "00aaSOBHighPolyFemaleGashWholeHead05HP",
+        "MarksFemaleHumanoid06LeftGash": "00aaSOBHighPolyFemaleGashWholeHead06HP",
+        "MarksFemaleHumanoid07RightGash": "00aaSOBHighPolyFemaleGashWholeHead07HP",
+        "MarksFemaleHumanoid08RightGash": "00aaSOBHighPolyFemaleGashWholeHead08HP",
+        "MarksFemaleHumanoid09RightGash": "00aaSOBHighPolyFemaleGashWholeHead01HP",
+        "MarksFemaleHumanoid10LeftGash": "00aaSOBHighPolyFemaleGashWholeHead02HP",
+        "MarksFemaleHumanoid10RightGashR": "00aaSOBHighPolyFemaleGashWholeHead02HP",
+        "MarksFemaleHumanoid11LeftGash": "00aaSOBHighPolyFemaleGashWholeHead03HP",
+        "MarksFemaleHumanoid11LeftGashR": "00aaSOBHighPolyFemaleGashWholeHead03HP",
+        "MarksFemaleHumanoid12LeftGash": "00aaSOBHighPolyFemaleGashWholeHead04HP",
+        "MarksFemaleHumanoid12LeftGashR": "00aaSOBHighPolyFemaleGashWholeHead04HP"
+      }
+    }
+  ]
+}

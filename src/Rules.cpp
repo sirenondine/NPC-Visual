@@ -65,6 +65,10 @@ namespace {
         std::vector<std::string> headVariants;
         std::string headPlugin;
         std::vector<std::string> partPrefixes;
+        // Part EditorID (prefix-stripped base or exact, lower-cased) -> replacement EditorID.
+        // For replacers whose parts don't share the vanilla name, e.g. DollFace HPH scars.
+        std::map<std::string, std::string> partMap;
+        std::string sex; // "female", "male" or empty for both
         std::map<std::string, std::string> raceAliases;
         std::vector<std::string> plugins, excludePlugins, races, excludeRaces, editorIdPrefixes, excludeEditorIdPrefixes;
         // Only swap a head that currently comes from one of these plugins.
@@ -189,8 +193,22 @@ namespace {
         return nullptr;
     }
 
+    RE::BGSHeadPart* MappedPart(RE::BGSHeadPart* a_hp, const Rule& a_rule, const HeadPartIndex& a_index)
+    {
+        if (a_rule.partMap.empty()) return nullptr;
+        const std::string cur = EditorIDOf(a_hp);
+        auto it = a_rule.partMap.find(Lower(cur));
+        if (it == a_rule.partMap.end()) it = a_rule.partMap.find(Lower(BasePartName(cur, a_rule)));
+        if (it == a_rule.partMap.end()) return nullptr;
+        auto* cand = a_index.Find(it->second);
+        if (!cand || cand == a_hp || cand->type.get() != a_hp->type.get()) return nullptr;
+        return cand;
+    }
+
     bool RuleMatches(RE::TESNPC* a_npc, RE::TESRace* a_race, const Rule& a_rule)
     {
+        if (!a_rule.sex.empty() && a_rule.sex != (a_npc->IsFemale() ? "female" : "male")) return false;
+
         const auto plugin = PluginOf(a_npc);
         if (!a_rule.plugins.empty() && !ListHas(a_rule.plugins, plugin)) return false;
         if (ListHas(a_rule.excludePlugins, plugin)) return false;
@@ -271,6 +289,16 @@ namespace {
                 rule.headVariants = ReadStringArray(r, "headVariants");
                 rule.headPlugin = ReadString(r, "headPlugin");
                 rule.partPrefixes = ReadStringArray(r, "partPrefixes");
+                if (r.HasMember("partMap") && r["partMap"].IsObject()) {
+                    for (auto it = r["partMap"].MemberBegin(); it != r["partMap"].MemberEnd(); ++it) {
+                        if (it->name.IsString() && it->value.IsString()) rule.partMap[Lower(it->name.GetString())] = it->value.GetString();
+                    }
+                }
+                rule.sex = Lower(ReadString(r, "sex"));
+                if (!rule.sex.empty() && rule.sex != "female" && rule.sex != "male") {
+                    logger::warn("[Rules] rule '{}' in {}: sex '{}' is not \"female\" or \"male\", ignored", rule.name, path.filename().string(), rule.sex);
+                    continue;
+                }
                 rule.raceAliases = { { "snowelf", "highelfsnow" }, { "da13afflicted", "bretonafflicted" } };
                 if (r.HasMember("raceAliases") && r["raceAliases"].IsObject()) {
                     for (auto it = r["raceAliases"].MemberBegin(); it != r["raceAliases"].MemberEnd(); ++it) {
@@ -288,8 +316,8 @@ namespace {
                     rule.headSourcePlugins = { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" };
                 }
 
-                if (!rule.SwapsHeads() && rule.partPrefixes.empty()) {
-                    logger::warn("[Rules] rule '{}' in {} does nothing (no headPrefix/headPlugin and no partPrefixes), ignored", rule.name, path.filename().string());
+                if (!rule.SwapsHeads() && rule.partPrefixes.empty() && rule.partMap.empty()) {
+                    logger::warn("[Rules] rule '{}' in {} does nothing (no headPrefix/headPlugin, partPrefixes or partMap), ignored", rule.name, path.filename().string());
                     continue;
                 }
                 if (rule.headPrefix.empty() && !rule.headPlugin.empty()) {
@@ -355,6 +383,16 @@ int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
                     ++partSwaps;
                     changed = true;
                 }
+                if (auto* mapped = MappedPart(hp, rule, index)) {
+                    logger::debug("[Rules] {} [{:08X}]: part {} -> {} (mapped, {})", EditorIDOf(npc), npc->GetFormID(), EditorIDOf(hp), EditorIDOf(mapped), rule.name);
+                    hp = mapped;
+                    ++partSwaps;
+                    changed = true;
+                }
+            }
+            // Two parts mapped onto the same replacement
+            for (auto it = parts.begin(); it != parts.end(); ++it) {
+                parts.erase(std::remove(std::next(it), parts.end(), *it), parts.end());
             }
 
             // The head for this race and sex
