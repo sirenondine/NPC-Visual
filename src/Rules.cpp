@@ -223,6 +223,22 @@ namespace {
         return true;
     }
 
+    bool IsTraitTemplated(RE::TESNPC* a_npc)
+    {
+        return a_npc->baseTemplateForm && a_npc->actorData.templateUseFlags.any(RE::ACTOR_BASE_DATA::TEMPLATE_USE_FLAG::kTraits);
+    }
+
+    RE::BGSHeadPart* RaceDefaultPart(RE::TESNPC* a_npc, RE::TESRace* a_race, RE::BGSHeadPart::HeadPartType a_type)
+    {
+        if (!a_race) return nullptr;
+        auto* face = a_race->faceRelatedData[a_npc->IsFemale() ? RE::SEXES::kFemale : RE::SEXES::kMale];
+        if (!face || !face->headParts) return nullptr;
+        for (auto* hp : *face->headParts) {
+            if (hp && hp->type.get() == a_type) return hp;
+        }
+        return nullptr;
+    }
+
     bool HasType(const std::vector<RE::BGSHeadPart*>& a_parts, RE::BGSHeadPart::HeadPartType a_type)
     {
         return std::any_of(a_parts.begin(), a_parts.end(), [&](auto* hp) { return hp && hp->type.get() == a_type; });
@@ -331,19 +347,78 @@ namespace {
     }
 }
 
-int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
+struct NRules::Session::Impl
 {
-    const auto rules = LoadRules();
-    if (rules.empty()) {
+    std::vector<Rule> rules = LoadRules();
+    HeadPartIndex index;
+    int jsonHeadSwaps = 0;
+};
+
+NRules::Session::Session() :
+    _impl(std::make_unique<Impl>())
+{
+    if (_impl->rules.empty()) {
         logger::info("[Rules] no rule files in {}", RulesPath);
-        return 0;
+    } else {
+        logger::info("[Rules] {} rule(s), {} head parts indexed", _impl->rules.size(), _impl->index.Size());
     }
+}
+
+NRules::Session::~Session() = default;
+
+bool NRules::Session::SwapDocumentHead(RE::TESNPC* a_npc, rapidjson::Document& a_doc)
+{
+    if (!a_npc || !a_npc->race || !a_doc.IsObject() || IsTraitTemplated(a_npc)) return false;
+    if (a_doc.HasMember("customFaceNif") && a_doc["customFaceNif"].IsString() && a_doc["customFaceNif"].GetStringLength() > 0) return false;
+    if (!a_doc.HasMember("headParts") || !a_doc["headParts"].IsArray()) return false;
+
+    auto& parts = a_doc["headParts"];
+    rapidjson::Value* faceRef = nullptr;
+    RE::BGSHeadPart* face = nullptr;
+    for (auto& ref : parts.GetArray()) {
+        auto* hp = FormUtil::ResolveForm<RE::BGSHeadPart>(ref);
+        if (hp && hp->type.get() == RE::BGSHeadPart::HeadPartType::kFace) {
+            faceRef = &ref;
+            face = hp;
+            break;
+        }
+    }
+    if (!face) face = RaceDefaultPart(a_npc, a_npc->race, RE::BGSHeadPart::HeadPartType::kFace);
+
+    // Same order as Apply(): once a rule has placed its head, later rules see
+    // a head outside their headSourcePlugins and keep it.
+    RE::BGSHeadPart* head = face;
+    const Rule* by = nullptr;
+    for (const auto& rule : _impl->rules) {
+        if (!rule.SwapsHeads() || !RuleMatches(a_npc, a_npc->race, rule)) continue;
+        auto* target = SwapTargetHead(a_npc, a_npc->race, rule, _impl->index);
+        if (!target || target == head) continue;
+        if (head && !rule.HeadSourceAllowed(PluginOf(head))) continue;
+        head = target;
+        by = &rule;
+    }
+    if (!by) return false;
+
+    auto& allocator = a_doc.GetAllocator();
+    if (faceRef) {
+        *faceRef = FormUtil::MakeFormRef(head, allocator);
+    } else {
+        parts.PushBack(FormUtil::MakeFormRef(head, allocator), allocator);
+    }
+    logger::debug("[Rules] {} [{:08X}]: JSON head {} -> {} ({})", EditorIDOf(a_npc), a_npc->GetFormID(), EditorIDOf(face), EditorIDOf(head), by->name);
+    ++_impl->jsonHeadSwaps;
+    return true;
+}
+
+int NRules::Session::Apply(const std::set<RE::FormID>& a_npcsWithJson)
+{
+    const auto& rules = _impl->rules;
+    if (rules.empty()) return 0;
 
     auto* handler = RE::TESDataHandler::GetSingleton();
     if (!handler) return 0;
 
-    const HeadPartIndex index;
-    logger::info("[Rules] {} rule(s), {} head parts indexed", rules.size(), index.Size());
+    const auto& index = _impl->index;
 
     int changedNPCs = 0, headSwaps = 0, partSwaps = 0, skippedJson = 0, skippedTemplate = 0, noHead = 0, keptCustomHead = 0;
     std::map<std::string, int> noHeadByRace;      // "NordRaceVampire (F)" -> count
@@ -356,7 +431,7 @@ int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
             continue;
         }
         // Traits come from the template NPC; the template gets its own pass
-        if (npc->baseTemplateForm && npc->actorData.templateUseFlags.any(RE::ACTOR_BASE_DATA::TEMPLATE_USE_FLAG::kTraits)) {
+        if (IsTraitTemplated(npc)) {
             ++skippedTemplate;
             continue;
         }
@@ -437,8 +512,8 @@ int NRules::Apply(const std::set<RE::FormID>& a_npcsWithJson)
         ++changedNPCs;
     }
 
-    logger::info("[Rules] applied: {} NPCs changed, {} head swaps, {} part swaps; skipped {} with JSON, {} templated; {} kept a custom head; {} without a head for their race/sex",
-        changedNPCs, headSwaps, partSwaps, skippedJson, skippedTemplate, keptCustomHead, noHead);
+    logger::info("[Rules] applied: {} NPCs changed, {} head swaps, {} part swaps; skipped {} with JSON ({} of them got the rule head), {} templated; {} kept a custom head; {} without a head for their race/sex",
+        changedNPCs, headSwaps, partSwaps, skippedJson, _impl->jsonHeadSwaps, skippedTemplate, keptCustomHead, noHead);
 
     auto logTally = [](const char* a_label, const std::map<std::string, int>& a_tally) {
         if (a_tally.empty()) return;

@@ -3677,6 +3677,7 @@ void NSettings::Load() {
 
     std::map<std::string, rapidjson::Document> presetCache;
     std::set<RE::FormID> npcsWithJson;
+    NRules::Session rules;
 
     const auto presetFiles = CollectJsonFiles(PresetsPath, LegacyPresetsPath);
     const auto npcFiles = CollectJsonFiles(NPCPath, LegacyNPCPath);
@@ -3780,6 +3781,7 @@ void NSettings::Load() {
             if (presetIt != presetCache.end()) {
                 logger::debug("[LoadSavedData] BuildSafeCustomizationDocument preset BEGIN preset='{}' npc={:08X}", presetName, targetNPC->GetFormID());
                 rapidjson::Document safePresetDoc = BuildSafeCustomizationDocument(targetNPC, presetIt->second);
+                rules.SwapDocumentHead(targetNPC, safePresetDoc);
                 logger::debug("[LoadSavedData] BuildSafeCustomizationDocument preset END preset='{}' npc={:08X}", presetName, targetNPC->GetFormID());
 
                 logger::debug("[LoadSavedData] BEGIN Apply preset '{}' em NPC {:08X}.", presetName, targetNPC->GetFormID());
@@ -3809,6 +3811,7 @@ void NSettings::Load() {
         else {
             logger::debug("[LoadSavedData] BuildSafeCustomizationDocument JSON unico BEGIN npc={:08X}", targetNPC->GetFormID());
             rapidjson::Document safeDoc = BuildSafeCustomizationDocument(targetNPC, doc);
+            rules.SwapDocumentHead(targetNPC, safeDoc);
             logger::debug("[LoadSavedData] BuildSafeCustomizationDocument JSON unico END npc={:08X}", targetNPC->GetFormID());
 
             logger::debug("[LoadSavedData] Aplicando JSON customizado unico para NPC {:08X}.", targetNPC->GetFormID());
@@ -3835,7 +3838,7 @@ void NSettings::Load() {
     }
 
     logger::debug("[LoadSavedData] Passo 3: Regras de runtime...");
-    const int countNPCsPorRegras = NRules::Apply(npcsWithJson);
+    const int countNPCsPorRegras = rules.Apply(npcsWithJson);
 
     logger::debug("[LoadSavedData] END presets={} npcs={}", countPresetsCarregados, countNPCsModificados);
     logger::info("[NPC Replacer] BOOT CONCLUIDO: {} presets em cache, {} NPCs modificados com sucesso, {} NPCs por regras.", countPresetsCarregados, countNPCsModificados, countNPCsPorRegras);

@@ -1,5 +1,8 @@
 #pragma once
+#include <memory>
 #include <set>
+
+#include "rapidjson/document.h"
 
 // Runtime head-part rules: Data/Viny Mods/NPC Visual/Rules/*.json.
 //
@@ -32,8 +35,28 @@
 //     }
 //   ]
 // }
+//
+// NPCs with their own JSON keep it, except for the head: when the JSON's Face
+// part still comes from headSourcePlugins (an export of a record no replacer
+// covers), SwapDocumentHead puts the rule head into the document before it is
+// applied. Documents with a customFaceNif are left alone.
 namespace NRules {
-    // Applies every rule file to every NPC not in a_npcsWithJson.
-    // Returns the number of NPCs changed.
-    int Apply(const std::set<RE::FormID>& a_npcsWithJson);
+    class Session
+    {
+    public:
+        Session(); // reads the rule files and indexes every head part
+        ~Session();
+
+        // Rewrites the Face entry of a per-NPC document's "headParts".
+        // Returns true when the document changed.
+        bool SwapDocumentHead(RE::TESNPC* a_npc, rapidjson::Document& a_doc);
+
+        // Applies every rule to every NPC not in a_npcsWithJson.
+        // Returns the number of NPCs changed.
+        int Apply(const std::set<RE::FormID>& a_npcsWithJson);
+
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> _impl;
+    };
 }
