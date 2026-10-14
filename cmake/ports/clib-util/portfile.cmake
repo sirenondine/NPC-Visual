@@ -8,6 +8,7 @@ vcpkg_from_github(
 )
 
 # Install codes
-set(CLIBUTIL_SOURCE	${SOURCE_PATH}/include/ClibUtil)
-file(INSTALL ${CLIBUTIL_SOURCE} DESTINATION ${CURRENT_PACKAGES_DIR}/include)
+# Upstream's folder is CLIBUtil, includes say ClibUtil: install under the include
+# spelling so case-sensitive hosts (the local Linux build) find it too.
+file(INSTALL ${SOURCE_PATH}/include/CLIBUtil/ DESTINATION ${CURRENT_PACKAGES_DIR}/include/ClibUtil)
 vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")

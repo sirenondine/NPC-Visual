@@ -44,6 +44,25 @@
         "cacheVariables": {
           "CMAKE_BUILD_TYPE": "RelWithDebInfo"
         }
+      },
+      {
+        "name": "local",
+        "displayName": "Local Linux cross build (clang-cl + xwin, see tools/build-local.sh)",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/local",
+        "cacheVariables": {
+          "CMAKE_BUILD_TYPE": "Release",
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/clang-cl-xwin.cmake",
+          "VCPKG_TARGET_TRIPLET": "x64-windows-static-xwin",
+          "VCPKG_HOST_TRIPLET": "x64-linux",
+          "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports;${sourceDir}/cmake/ports-xwin",
+          "CMAKE_CXX_FLAGS": "/permissive- /Zc:preprocessor /EHsc /W4 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -DUNICODE -D_UNICODE",
+          "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded",
+          "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        }
       }
     ]
 }

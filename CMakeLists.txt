@@ -21,7 +21,9 @@ set(PRODUCT_NAME "NPCReplacer")
 project(${PRODUCT_NAME} VERSION 0.1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
 
 configure_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.rc.in
@@ -31,9 +33,11 @@ configure_file(
 set(RESOURCE_FILE ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 set(RESOURCE_OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/version.res)
 
+# rc on MSVC, llvm-rc in the local clang-cl/xwin build
+find_program(RC_TOOL NAMES rc llvm-rc REQUIRED)
 add_custom_command(
     OUTPUT ${RESOURCE_OUTPUT}
-    COMMAND rc /fo ${RESOURCE_OUTPUT} ${RESOURCE_FILE}
+    COMMAND ${RC_TOOL} /fo ${RESOURCE_OUTPUT} ${RESOURCE_FILE}
     DEPENDS ${RESOURCE_FILE}
 )
 
@@ -49,7 +53,7 @@ add_subdirectory("$ENV{COMMONLIB_SSE_FOLDER}" ${CMAKE_CURRENT_BINARY_DIR}/_deps/
 get_target_property(COMMONLIB_SRC_DIR CommonLibSSE SOURCE_DIR)
 
 find_path(CLIB_UTIL_INCLUDE_DIRS "ClibUtil/utils.hpp")
-find_path(CLIB_UTILS_QTR_INCLUDE_DIRS "ClibUtilsQTR/utils.hpp")
+find_path(CLIB_UTILS_QTR_INCLUDE_DIRS "CLibUtilsQTR/FormReader.hpp")
 find_path(SKSE_MCP_INCLUDE_DIRS "SKSEMCP/utils.hpp")
 
 
